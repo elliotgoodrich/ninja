@@ -741,6 +741,34 @@ bool Builder::AlreadyUpToDate() const {
 
 bool Builder::Build(string* err) {
   assert(!AlreadyUpToDate());
+
+  if (config_.filter_file) {
+    string content;
+    if (disk_interface_->ReadFile(config_.filter_file, &content, err) != DiskInterface::Okay) {
+        *err = "Cannot find -e file";
+        return false;
+    }
+
+    set<Node*> filter;
+    for (auto start = content.begin(), finish = std::find(start, content.end(), '\n'); start != finish; start = finish + 1) {
+      const StringPiece path(&*start, finish - start);
+      Node *n = state_->LookupNode(path);
+      if (!n) {
+        *err = "Cannot find file '";
+        err->append(path.begin(), path.size());
+        *err += "' in filter file";
+        return false;
+      }
+
+      filter.insert(n);
+    }
+
+    // TODO: Go through the plan and change the `Want`ness of the edges so that we only want the exact dependents.
+      //if (!plan_.CleanNode(&scan_, n, err)) {
+        //return false;
+      //}
+  }
+
   plan_.PrepareQueue();
 
   status_->PlanHasTotalEdges(plan_.command_edge_count());

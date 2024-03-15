@@ -166,7 +166,7 @@ struct CommandRunner {
 /// Options (e.g. verbosity, parallelism) passed to a build.
 struct BuildConfig {
   BuildConfig() : verbosity(NORMAL), dry_run(false), parallelism(1),
-                  failures_allowed(1), max_load_average(-0.0f) {}
+                  failures_allowed(1), max_load_average(-0.0f), filter_file(NULL) {}
 
   enum Verbosity {
     QUIET,  // No output -- used when testing.
@@ -182,6 +182,7 @@ struct BuildConfig {
   /// means that we do not have any limit.
   double max_load_average;
   DepfileParserOptions depfile_parser_options;
+  const char *filter_file;
 };
 
 /// Builder wraps the build process: starting commands, updating status.

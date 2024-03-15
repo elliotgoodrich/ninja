@@ -12,6 +12,35 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+/* GOAL
+Only run those command that have a transitive dependency on a particular set of sources
+
+  1. If `target` is not a phony edge, then only build it if at least one descendent is specified
+  2. If `target` is a phony edge, then break it up into child edges
+  3. After generating dyndeps, if there is no dynamic dependency on any specified file, then remove the output from the graph (e.g. like what we do with restat=1)
+  4. (optional) Only append validations if they have a dependency on a specified file
+
+I think the best way to handle this is to change the `Want`ness of `Edge`s in `Plan`.
+
+  enum Want
+  {
+    /// We do not want to build the edge, but we might want to build one of
+    /// its dependents.
+    kWantNothing,
+    /// We want to build the edge, but have not yet scheduled it.
+    kWantToStart,
+    /// We want to build the edge, have scheduled it, and are waiting
+    /// for it to complete.
+    kWantToFinish
+  };
+
+If we can change to `kWantNothing` from `kWantToStart` based on whether there is a dependency we care
+about.  Then this should fix everything.
+
+Then afterwards, we look at the same place we call `CleanNode` for `restat`, and do the same for whether
+there was a dependency in the `dyndeps` that we care about.
+*/
+
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -1352,6 +1381,8 @@ int NinjaMain::RunBuild(int argc, char** argv, Status* status) {
     }
   }
 
+  // Trim things down
+
   // Make sure restat rules do not see stale timestamps.
   disk_interface_.AllowStatCache(false);
 
@@ -1430,12 +1461,15 @@ int ReadFlags(int* argc, char*** argv,
 
   int opt;
   while (!options->tool &&
-         (opt = getopt_long(*argc, *argv, "d:f:j:k:l:nt:vw:C:h", kLongOptions,
+         (opt = getopt_long(*argc, *argv, "d:f:j:k:l:nt:vw:C:h:e", kLongOptions,
                             NULL)) != -1) {
     switch (opt) {
       case 'd':
         if (!DebugEnable(optarg))
           return 1;
+        break;
+      case 'e':
+        config->filter_file = optarg;
         break;
       case 'f':
         options->input_file = optarg;
