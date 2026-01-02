@@ -81,14 +81,17 @@ bool DryRunCommandRunner::WaitForCommand(Result* result) {
 Plan::Plan(Builder* builder)
   : builder_(builder)
   , command_edges_(0)
-  , wanted_edges_(0)
-{}
+  , wanted_edges_(0) {
+  // Avoid unnecessary reallocations and reserve enough for all
+  // of the currently known edges.
+  want_edges_.reserve(builder_->state_->edges_.size());
+}
 
 void Plan::Reset() {
   command_edges_ = 0;
   wanted_edges_ = 0;
   ready_.clear();
-  want_.clear();
+  want_edges_.clear();
 }
 
 bool Plan::AddTarget(const Node* target, string* err) {
@@ -118,11 +121,13 @@ bool Plan::AddSubTarget(const Node* node, const Node* dependent, string* err,
   if (edge->outputs_ready())
     return false;  // Don't need to do anything.
 
-  // If an entry in want_ does not already exist for edge, create an entry which
+  // If an entry in want_edges_ does not already exist for edge, create an entry which
   // maps to kWantNothing, indicating that we do not want to build this entry itself.
-  pair<map<Edge*, Want>::iterator, bool> want_ins =
-    want_.insert(make_pair(edge, kWantNothing));
-  Want& want = want_ins.first->second;
+  if (edge->id_ >= want_edges_.size()) {
+    want_edges_.resize(edge->id_ + 1, kAbsent);
+    want_edges_[edge->id_] = kWantNothing;
+  }
+  Want& want = want_edges_[edge->id_];
 
   if (dyndep_walk && want == kWantToFinish)
     return false;  // Don't need to do anything with already-scheduled edge.
@@ -137,7 +142,7 @@ bool Plan::AddSubTarget(const Node* node, const Node* dependent, string* err,
   if (dyndep_walk)
     dyndep_walk->insert(edge);
 
-  if (!want_ins.second)
+  if (want != kAbsent)
     return true;  // We've already processed the inputs.
 
   for (vector<Node*>::iterator i = edge->inputs_.begin();
@@ -176,18 +181,18 @@ Edge* Plan::FindWork() {
   return work;
 }
 
-void Plan::ScheduleWork(map<Edge*, Want>::iterator want_e) {
-  if (want_e->second == kWantToFinish) {
+void Plan::ScheduleWork(Edge* edge) {
+  Want& want = want_edges_[edge->id_];
+  if (want == kWantToFinish) {
     // This edge has already been scheduled.  We can get here again if an edge
     // and one of its dependencies share an order-only input, or if a node
     // duplicates an out edge (see https://github.com/ninja-build/ninja/pull/519).
     // Avoid scheduling the work again.
     return;
   }
-  assert(want_e->second == kWantToStart);
-  want_e->second = kWantToFinish;
+  assert(want == kWantToStart);
+  want = kWantToFinish;
 
-  Edge* edge = want_e->first;
   Pool* pool = edge->pool();
   if (pool->ShouldDelayEdge()) {
     pool->DelayEdge(edge);
@@ -199,9 +204,8 @@ void Plan::ScheduleWork(map<Edge*, Want>::iterator want_e) {
 }
 
 bool Plan::EdgeFinished(Edge* edge, EdgeResult result, string* err) {
-  map<Edge*, Want>::iterator e = want_.find(edge);
-  assert(e != want_.end());
-  bool directly_wanted = e->second != kWantNothing;
+  Want& want = want_edges_[edge->id_];
+  const bool directly_wanted = want != kWantNothing;
 
   // See if this job frees up any delayed jobs.
   if (directly_wanted)
@@ -218,7 +222,7 @@ bool Plan::EdgeFinished(Edge* edge, EdgeResult result, string* err) {
 
   if (directly_wanted)
     --wanted_edges_;
-  want_.erase(e);
+  want = kAbsent;
   edge->outputs_ready_ = true;
 
   // Check off any nodes we were waiting for with this edge.
@@ -242,22 +246,22 @@ bool Plan::NodeFinished(Node* node, string* err) {
   // See if we we want any edges from this node.
   for (vector<Edge*>::const_iterator oe = node->out_edges().begin();
        oe != node->out_edges().end(); ++oe) {
-    map<Edge*, Want>::iterator want_e = want_.find(*oe);
-    if (want_e == want_.end())
+    const Want want = want_edges_[(*oe)->id_];
+    if (want == kAbsent)
       continue;
 
     // See if the edge is now ready.
-    if (!EdgeMaybeReady(want_e, err))
+    if (!EdgeMaybeReady(*oe, err))
       return false;
   }
   return true;
 }
 
-bool Plan::EdgeMaybeReady(map<Edge*, Want>::iterator want_e, string* err) {
-  Edge* edge = want_e->first;
+bool Plan::EdgeMaybeReady(Edge* edge, string* err) {
+  assert(want_edges_[edge->id_] != kAbsent);
   if (edge->AllInputsReady()) {
-    if (want_e->second != kWantNothing) {
-      ScheduleWork(want_e);
+    if (want_edges_[edge->id_] != kWantNothing) {
+      ScheduleWork(edge);
     } else {
       // We do not need to build this edge, but we might need to build one of
       // its dependents.
@@ -274,8 +278,8 @@ bool Plan::CleanNode(DependencyScan* scan, Node* node, string* err) {
   for (vector<Edge*>::const_iterator oe = node->out_edges().begin();
        oe != node->out_edges().end(); ++oe) {
     // Don't process edges that we don't actually want.
-    map<Edge*, Want>::iterator want_e = want_.find(*oe);
-    if (want_e == want_.end() || want_e->second == kWantNothing)
+    Want& want = want_edges_[(*oe)->id_];
+    if (want == kAbsent || want == kWantNothing)
       continue;
 
     // Don't attempt to clean an edge if it failed to load deps.
@@ -315,7 +319,7 @@ bool Plan::CleanNode(DependencyScan* scan, Node* node, string* err) {
             return false;
         }
 
-        want_e->second = kWantNothing;
+        want = kWantNothing;
         --wanted_edges_;
         if (!(*oe)->is_phony()) {
           --command_edges_;
@@ -349,11 +353,12 @@ bool Plan::DyndepsLoaded(DependencyScan* scan, const Node* node,
     if (edge->outputs_ready())
       continue;
 
-    map<Edge*, Want>::iterator want_e = want_.find(edge);
+    const Want want =
+        edge->id_ < want_edges_.size() ? want_edges_[edge->id_] : kAbsent;
 
     // If the edge has not been encountered before then nothing already in the
     // plan depends on it so we do not need to consider the edge yet either.
-    if (want_e == want_.end())
+    if (want == kAbsent)
       continue;
 
     // This edge is already in the plan so queue it for the walk.
@@ -377,19 +382,17 @@ bool Plan::DyndepsLoaded(DependencyScan* scan, const Node* node,
   // Plan::NodeFinished would have without taking the dyndep code path).
   for (vector<Edge*>::const_iterator oe = node->out_edges().begin();
        oe != node->out_edges().end(); ++oe) {
-    map<Edge*, Want>::iterator want_e = want_.find(*oe);
-    if (want_e == want_.end())
+    if (want_edges_[(*oe)->id_] == kAbsent)
       continue;
-    dyndep_walk.insert(want_e->first);
+    dyndep_walk.insert(*oe);
   }
 
   // See if any encountered edges are now ready.
   for (set<Edge*>::iterator wi = dyndep_walk.begin();
        wi != dyndep_walk.end(); ++wi) {
-    map<Edge*, Want>::iterator want_e = want_.find(*wi);
-    if (want_e == want_.end())
+    if (want_edges_[(*wi)->id_] == kAbsent)
       continue;
-    if (!EdgeMaybeReady(want_e, err))
+    if (!EdgeMaybeReady(*wi, err))
       return false;
   }
 
@@ -433,10 +436,10 @@ bool Plan::RefreshDyndepDependents(DependencyScan* scan, const Node* node,
     // information an output is now known to be dirty, so we want the edge.
     Edge* edge = n->in_edge();
     assert(edge && !edge->outputs_ready());
-    map<Edge*, Want>::iterator want_e = want_.find(edge);
-    assert(want_e != want_.end());
-    if (want_e->second == kWantNothing) {
-      want_e->second = kWantToStart;
+    Want& want = want_edges_[edge->id_];
+    assert(want != kAbsent);
+    if (want == kWantNothing) {
+      want = kWantToStart;
       EdgeWanted(edge);
     }
   }
@@ -448,8 +451,7 @@ void Plan::UnmarkDependents(const Node* node, set<Node*>* dependents) {
        oe != node->out_edges().end(); ++oe) {
     Edge* edge = *oe;
 
-    map<Edge*, Want>::iterator want_e = want_.find(edge);
-    if (want_e == want_.end())
+    if (want_edges_[edge->id_] == kAbsent)
       continue;
 
     if (edge->mark_ != Edge::VisitNone) {
@@ -489,6 +491,8 @@ void Plan::ComputeCriticalPath() {
   //    i.e. the edges producing its inputs, in the list.
   //
   struct TopoSort {
+    explicit TopoSort(std::size_t edge_count) : visited_edges_(edge_count) {}
+
     void VisitTarget(const Node* target) {
       Edge* producer = target->in_edge();
       if (producer)
@@ -512,9 +516,9 @@ void Plan::ComputeCriticalPath() {
     //   which edges have already been visited.
     //
     void Visit(Edge* edge) {
-      auto insertion = visited_set_.emplace(edge);
-      if (!insertion.second)
+      if (visited_edges_[edge->id_])
         return;
+      visited_edges_[edge->id_] = true;
 
       for (const Node* input : edge->inputs_) {
         Edge* producer = input->in_edge();
@@ -524,11 +528,11 @@ void Plan::ComputeCriticalPath() {
       sorted_edges_.push_back(edge);
     }
 
-    std::unordered_set<Edge*> visited_set_;
+    std::vector<bool> visited_edges_;
     std::vector<Edge*> sorted_edges_;
   };
 
-  TopoSort topo_sort;
+  TopoSort topo_sort(builder_->state_->edges_.size());
   for (const Node* target : targets_) {
     topo_sort.VisitTarget(target);
   }
@@ -565,18 +569,23 @@ void Plan::ScheduleInitialEdges() {
   assert(ready_.empty());
   std::set<Pool*> pools;
 
-  for (std::map<Edge*, Plan::Want>::iterator it = want_.begin(),
-           end = want_.end(); it != end; ++it) {
-    Edge* edge = it->first;
-    Plan::Want want = it->second;
-    if (want == kWantToStart && edge->AllInputsReady()) {
-      Pool* pool = edge->pool();
-      if (pool->ShouldDelayEdge()) {
-        pool->DelayEdge(edge);
-        pools.insert(pool);
-      } else {
-        ScheduleWork(it);
-      }
+  for (int edge_id = 0; edge_id < want_edges_.size(); ++edge_id) {
+    Plan::Want want = want_edges_[edge_id];
+    if (want != kWantToStart) {
+      continue;
+    }
+
+    Edge* edge = builder_->state_->edges_[edge_id];
+    if (!edge->AllInputsReady()) {
+      continue;
+    }
+
+    Pool* pool = edge->pool();
+    if (pool->ShouldDelayEdge()) {
+      pool->DelayEdge(edge);
+      pools.insert(pool);
+    } else {
+      ScheduleWork(edge);
     }
   }
 
@@ -595,11 +604,13 @@ void Plan::PrepareQueue() {
 }
 
 void Plan::Dump() const {
-  printf("pending: %d\n", (int)want_.size());
-  for (map<Edge*, Want>::const_iterator e = want_.begin(); e != want_.end(); ++e) {
-    if (e->second != kWantNothing)
+  printf("pending: %d\n", (int)want_edges_.size());
+  for (int edge_id = 0; edge_id < want_edges_.size(); ++edge_id) {
+    const Plan::Want want = want_edges_[edge_id];
+    if (want != kAbsent && want != kWantNothing) {
       printf("want ");
-    e->first->Dump();
+      builder_->state_->edges_[edge_id]->Dump();
+    }
   }
   printf("ready: %d\n", (int)ready_.size());
 }

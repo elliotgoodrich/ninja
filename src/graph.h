@@ -272,14 +272,6 @@ struct Edge {
   int64_t prev_elapsed_time_millis = -1;
 };
 
-struct EdgeCmp {
-  bool operator()(const Edge* a, const Edge* b) const {
-    return a->id_ < b->id_;
-  }
-};
-
-typedef std::set<Edge*, EdgeCmp> EdgeSet;
-
 /// ImplicitDepLoader loads implicit dependencies, as referenced via the
 /// "depfile" attribute in build files.
 struct ImplicitDepLoader {

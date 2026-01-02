@@ -19,8 +19,13 @@
 
 #include "dyndep.h"
 #include "graph.h"
+#include "state.h"
 
 using namespace std;
+
+GraphViz::GraphViz(State* state, DiskInterface* disk_interface)
+    : dyndep_loader_(state, disk_interface),
+      visited_edges_(state->edges_.size()) {}
 
 void GraphViz::AddTarget(Node* node) {
   if (visited_nodes_.find(node) != visited_nodes_.end())
@@ -39,9 +44,9 @@ void GraphViz::AddTarget(Node* node) {
     return;
   }
 
-  if (visited_edges_.find(edge) != visited_edges_.end())
+  if (visited_edges_[edge->id_])
     return;
-  visited_edges_.insert(edge);
+  visited_edges_[edge->id_] = true;
 
   if (edge->dyndep_ && edge->dyndep_->dyndep_pending()) {
     std::string err;

@@ -86,8 +86,10 @@ struct Plan {
                      const DyndepFile& ddf, std::string* err);
 
   /// Enumerate possible steps we want for an edge.
-  enum Want
+  enum Want : char
   {
+    kAbsent,
+
     /// We do not want to build the edge, but we might want to build one of
     /// its dependents.
     kWantNothing,
@@ -116,18 +118,18 @@ private:
   bool NodeFinished(Node* node, std::string* err);
 
   void EdgeWanted(const Edge* edge);
-  bool EdgeMaybeReady(std::map<Edge*, Want>::iterator want_e, std::string* err);
+  bool EdgeMaybeReady(Edge* edge, std::string* err);
 
   /// Submits a ready edge as a candidate for execution.
   /// The edge may be delayed from running, for example if it's a member of a
   /// currently-full pool.
-  void ScheduleWork(std::map<Edge*, Want>::iterator want_e);
+  void ScheduleWork(Edge* edge);
 
   /// Keep track of which edges we want to build in this plan.  If this map does
   /// not contain an entry for an edge, we do not want to build the entry or its
   /// dependents.  If it does contain an entry, the enumeration indicates what
   /// we want for the edge.
-  std::map<Edge*, Want> want_;
+  std::vector<Want> want_edges_;
 
   EdgePriorityQueue ready_;
 

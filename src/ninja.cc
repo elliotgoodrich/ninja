@@ -714,11 +714,12 @@ int NinjaMain::ToolWinCodePage(const Options* options, int argc, char* argv[]) {
 #endif
 
 enum PrintCommandMode { PCM_Single, PCM_All };
-void PrintCommands(Edge* edge, EdgeSet* seen, PrintCommandMode mode) {
+void PrintCommands(Edge* edge, std::vector<bool>* seen, PrintCommandMode mode) {
   if (!edge)
     return;
-  if (!seen->insert(edge).second)
+  if ((*seen)[edge->id_])
     return;
+  (*seen)[edge->id_] = true;
 
   if (mode == PCM_All) {
     for (vector<Node*>::iterator in = edge->inputs_.begin();
@@ -765,7 +766,7 @@ int NinjaMain::ToolCommands(const Options* options, int argc, char* argv[]) {
     return 1;
   }
 
-  EdgeSet seen;
+  std::vector<bool> seen(state_.edges_.size());
   for (vector<Node*>::iterator in = nodes.begin(); in != nodes.end(); ++in)
     PrintCommands((*in)->in_edge(), &seen, mode);
 
