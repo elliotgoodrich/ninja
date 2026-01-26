@@ -122,12 +122,11 @@ void Info(const char* msg, ...) {
 }
 
 void CanonicalizePath(string* path, uint64_t* slash_bits) {
-  size_t len = path->size();
-  char* str = 0;
-  if (len > 0)
-    str = &(*path)[0];
-  CanonicalizePath(str, &len, slash_bits);
-  path->resize(len);
+  std::size_t len = path->size();
+  if (len > 0) {
+    CanonicalizePath(&(*path)[0], &len, slash_bits);
+    path->erase(path->begin() + len, path->end());
+  }
 }
 
 static bool IsPathSeparator(char c) {
@@ -148,24 +147,19 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
   char* start = path;
   char* dst = start;
   char* dst_start = dst;
-  const char* src = start;
   const char* end = start + *len;
-  const char* src_next;
 
   // For absolute paths, skip the leading directory separator
   // as this one should never be removed from the result.
-  if (IsPathSeparator(*src)) {
+  if (IsPathSeparator(*dst)) {
 #ifdef _WIN32
     // Windows network path starts with //
-    if (src + 2 <= end && IsPathSeparator(src[1])) {
-      src += 2;
+    if (dst + 2 <= end && IsPathSeparator(dst[1])) {
       dst += 2;
     } else {
-      ++src;
       ++dst;
     }
 #else
-    ++src;
     ++dst;
 #endif
     dst_start = dst;
@@ -173,15 +167,16 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
     // For relative paths, skip any leading ../ as these are quite common
     // to reference source files in build plans, and doing this here makes
     // the loop work below faster in general.
-    while (src + 3 <= end && src[0] == '.' && src[1] == '.' &&
-           IsPathSeparator(src[2])) {
-      src += 3;
+    while (dst + 3 <= end && dst[0] == '.' && dst[1] == '.' &&
+           IsPathSeparator(dst[2])) {
       dst += 3;
     }
   }
 
-  // Loop over all components of the paths _except_ the last one, in
-  // order to simplify the loop's code and make it faster.
+  const char* src = dst;
+  const char* src_next;
+
+  // Loop over all components of the paths
   int component_count = 0;
   char* dst0 = dst;
   for (; src < end; src = src_next) {
@@ -191,25 +186,22 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
     // difference (e,g, 484ms vs 437ms).
     const char* next_sep =
         static_cast<const char*>(::memchr(src, '/', end - src));
-    if (!next_sep) {
-      // This is the last component, will be handled out of the loop.
-      break;
-    }
+    // Position for next loop iteration.
+    src_next = next_sep ? next_sep + 1 : end;
+    // Length of the component, excluding trailing directory.
+    const std::size_t component_len = next_sep ? next_sep - src : end - src;
 #else
     // Need to check for both '/' and '\\' so do not use memchr().
     // Cannot use strpbrk() because end[0] can be \0 or something else!
     const char* next_sep = src;
     while (next_sep != end && !IsPathSeparator(*next_sep))
       ++next_sep;
-    if (next_sep == end) {
-      // This is the last component, will be handled out of the loop.
-      break;
-    }
-#endif
+
     // Position for next loop iteration.
-    src_next = next_sep + 1;
+    src_next = next_sep != end ? next_sep + 1 : end;
     // Length of the component, excluding trailing directory.
-    size_t component_len = next_sep - src;
+    const std::size_t component_len = next_sep - src;
+#endif
 
     if (component_len <= 2) {
       if (component_len == 0) {
@@ -220,19 +212,13 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
           continue;  // Ignore '.' component, e.g. './foo' -> 'foo'.
         } else if (src[1] == '.') {
           // Process the '..' component if found. Back up if possible.
-          if (component_count > 0) {
+          if (component_count-- > 0) {
             // Move back to start of previous component.
-            --component_count;
             while (--dst > dst0 && !IsPathSeparator(dst[-1])) {
               // nothing to do here, decrement happens before condition check.
             }
-          } else {
-            dst[0] = '.';
-            dst[1] = '.';
-            dst[2] = src[2];
-            dst += 3;
+            continue;
           }
-          continue;
         }
       }
     }
@@ -244,38 +230,6 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
     }
     dst += src_next - src;
   }
-
-  // Handling the last component that does not have a trailing separator.
-  // The logic here is _slightly_ different since there is no trailing
-  // directory separator.
-  size_t component_len = end - src;
-  do {
-    if (component_len == 0)
-      break;  // Ignore empty component (e.g. 'foo//' -> 'foo/')
-    if (src[0] == '.') {
-      if (component_len == 1)
-        break;  // Ignore trailing '.' (e.g. 'foo/.' -> 'foo/')
-      if (component_len == 2 && src[1] == '.') {
-        // Handle '..'. Back up if possible.
-        if (component_count > 0) {
-          while (--dst > dst0 && !IsPathSeparator(dst[-1])) {
-            // nothing to do here, decrement happens before condition check.
-          }
-        } else {
-          dst[0] = '.';
-          dst[1] = '.';
-          dst += 2;
-          // No separator to add here.
-        }
-        break;
-      }
-    }
-    // Skip or copy last component, no trailing separator.
-    if (dst != src) {
-      ::memmove(dst, src, component_len);
-    }
-    dst += component_len;
-  } while (0);
 
   // Remove trailing path separator if any, but keep the initial
   // path separator(s) if there was one (or two on Windows).
@@ -292,7 +246,7 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
   uint64_t bits = 0;
   uint64_t bits_mask = 1;
 
-  for (char* c = start; c < start + *len; ++c) {
+  for (char* c = start; c < end; ++c) {
     switch (*c) {
       case '\\':
         bits |= bits_mask;
