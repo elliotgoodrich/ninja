@@ -175,6 +175,11 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
 
   const char* src = dst;
   const char* src_next;
+#ifdef _WIN32
+  // Track next forwardslashes and backslashes on Windows.
+  const char* next_fs = nullptr;
+  const char* next_bs = nullptr;
+#endif
 
   // Loop over all components of the paths
   int component_count = 0;
@@ -191,16 +196,23 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
     // Length of the component, excluding trailing directory.
     const std::size_t component_len = next_sep ? next_sep - src : end - src;
 #else
-    // Need to check for both '/' and '\\' so do not use memchr().
-    // Cannot use strpbrk() because end[0] can be \0 or something else!
-    const char* next_sep = src;
-    while (next_sep != end && !IsPathSeparator(*next_sep))
-      ++next_sep;
+    if (!next_bs) {
+      next_bs = static_cast<const char*>(::memchr(src, '\\', end - src));
+      next_bs = next_bs ? next_bs : end;
+    }
+    if (!next_fs) {
+      next_fs = static_cast<const char*>(::memchr(src, '/', end - src));
+      next_fs = next_fs ? next_fs : end;
+    }
+    const char*& next_sep = next_fs < next_bs ? next_fs : next_bs;
 
     // Position for next loop iteration.
     src_next = next_sep != end ? next_sep + 1 : end;
     // Length of the component, excluding trailing directory.
     const std::size_t component_len = next_sep - src;
+
+    // Reset either `next_fs` or `next_bs` to search in the next iteration.
+    next_sep = nullptr;
 #endif
 
     if (component_len <= 2) {
