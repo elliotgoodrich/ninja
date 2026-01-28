@@ -173,12 +173,24 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
     }
   }
 
+#ifdef _WIN32
+  // Keep track of all slashes we may have seen but not tracked whether
+  // it was backslashes or forwardslashes.
+  const char* unknown_slashes_end = dst;
+#endif
+
   const char* src = dst;
   const char* src_next;
 #ifdef _WIN32
-  // Track next forwardslashes and backslashes on Windows.
-  const char* next_fs = nullptr;
-  const char* next_bs = nullptr;
+  // Track next forwardslashes and backslashes on Windows. Do an initial
+  // lookup for the first backslash as we can use this to potentially
+  // skip work setting `slash_bits`.
+  const char* first_fs =
+      static_cast<const char*>(::memchr(src, '/', end - src));
+  const char* next_fs = first_fs ? first_fs : end;
+  const char* first_bs =
+      static_cast<const char*>(::memchr(src, '\\', end - src));
+  const char* next_bs = first_bs ? first_bs : end;
 #endif
 
   // Loop over all components of the paths
@@ -255,17 +267,40 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
 
   *len = dst - start;  // dst points after the trailing char here.
 #ifdef _WIN32
-  uint64_t bits = 0;
-  uint64_t bits_mask = 1;
 
-  for (char* c = start; c < end; ++c) {
+  // Fast path for all forwardslashes
+  if (!first_bs && !::memchr(start, '\\', unknown_slashes_end - start)) {
+    *slash_bits = 0;
+    return;
+  }
+
+  // Medium path for all backslashes
+  if (!first_fs && !::memchr(start, '/', unknown_slashes_end - start)) {
+    char* c =
+        static_cast<char*>(::memchr(start, '\\', dst - start));
+    int bs_count = 0;
+    while (c) {
+      ++bs_count;
+      *c++ = '/';
+      c = static_cast<char*>(::memchr(c, '\\', dst - c));
+    }
+    *slash_bits = bs_count >= 64
+                      ? ~std::uint64_t(0)
+                      : (static_cast<std::uint64_t>(1) << (bs_count)) - 1;
+    return;
+  }
+
+  // Slow path for a mixture of both
+  std::uint64_t bits = 0;
+  std::uint64_t bits_mask = 1;
+  for (char* c = start; c < dst; ++c) {
     switch (*c) {
-      case '\\':
-        bits |= bits_mask;
-        *c = '/';
-        NINJA_FALLTHROUGH;
-      case '/':
-        bits_mask <<= 1;
+    case '\\':
+      bits |= bits_mask;
+      *c = '/';
+      NINJA_FALLTHROUGH;
+    case '/':
+      bits_mask <<= 1;
     }
   }
 
