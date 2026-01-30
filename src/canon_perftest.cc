@@ -21,8 +21,10 @@
 using namespace std;
 
 const char kPath[] =
-    "../../third_party/WebKit/Source/WebCore/"
-    "platform/leveldb/LevelDBWriteBatch.cpp";
+  //  "../../third_party/WebKit/Source/WebCore/"
+  //  "platform/leveldb/LevelDBWriteBatch.cpp";
+"..\\..\\third_party\\WebKit\\Source\\WebCore\\"
+    "platform\\leveldb\\LevelDBWriteBatch.cpp";
 
 int main() {
   vector<int> times;
@@ -31,11 +33,13 @@ int main() {
   size_t len = strlen(kPath);
   strcpy(buf, kPath);
 
-  for (int j = 0; j < 5; ++j) {
+  for (int j = 0; j < 50; ++j) {
     const int kNumRepetitions = 2000000;
     int64_t start = GetTimeMillis();
     uint64_t slash_bits;
     for (int i = 0; i < kNumRepetitions; ++i) {
+      std::copy(std::begin(kPath), std::end(kPath), buf);
+      len = std::size(kPath);
       CanonicalizePath(buf, &len, &slash_bits);
     }
     int delta = (int)(GetTimeMillis() - start);

@@ -274,7 +274,7 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
     return;
   }
 
-  // Medium path for all backslashes
+  // Medium-slow path for all backslashes
   if (!first_fs && !::memchr(start, '/', unknown_slashes_end - start)) {
     char* c =
         static_cast<char*>(::memchr(start, '\\', dst - start));

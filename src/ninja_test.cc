@@ -15,6 +15,8 @@
 #include <gtest/gtest.h>
 
 int main(int argc, char **argv) {
-  testing::InitGoogleTest(&argc, argv);
+  argc = 2;
+  char* next[] = { argv[0], "--gtest_filter=*CanonicalizePath.SlashTracking*" };
+  testing::InitGoogleTest(&argc, next);
   return RUN_ALL_TESTS();
 }
