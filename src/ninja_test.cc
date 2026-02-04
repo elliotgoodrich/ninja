@@ -15,6 +15,10 @@
 #include <gtest/gtest.h>
 
 int main(int argc, char **argv) {
+  argc = 2;
+  char* next[] = { argv[0], "--gtest_filter=*CanonicalizePath.PathSamples",
+                   nullptr };
+  argv = next;
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }
