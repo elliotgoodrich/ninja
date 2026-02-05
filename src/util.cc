@@ -176,6 +176,21 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
 
   const char* src = dst;
   const char* src_next;
+#ifdef _WIN32
+  // Keep track of all slashes we may have seen but not tracked whether
+  // it was backslashes or forwardslashes for calculating `slash_bits`.
+  const char* unknown_slashes_end = dst;
+
+  // Track next forwardslashes and backslashes on Windows. Do an initial
+  // lookup for the first backslash as we can use this to potentially
+  // skip work setting `slash_bits`.
+  const char* first_fs =
+      static_cast<const char*>(::memchr(src, '/', end - src));
+  const char* next_fs = first_fs ? first_fs : end;
+  const char* first_bs =
+      static_cast<const char*>(::memchr(src, '\\', end - src));
+  const char* next_bs = first_bs ? first_bs : end;
+#endif
 
   // Keep track of characters that can't be removed by ".." components
   char* dst0 = dst;
@@ -196,16 +211,25 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
     // Length of the component, excluding trailing directory.
     src_next = next_sep ? next_sep + 1 : end;
 #else
-    // Need to check for both '/' and '\\' so do not use memchr().
-    // Cannot use strpbrk() because end[0] can be \0 or something else!
-    const char* next_sep = src;
-    while (next_sep != end && !IsPathSeparator(*next_sep))
-      ++next_sep;
+    // Multiple calls to `memchr` are much more efficient than manually
+    // looping and checking for both '/' and '\\'.
+    if (!next_bs) {
+      next_bs = static_cast<const char*>(::memchr(src, '\\', end - src));
+      next_bs = next_bs ? next_bs : end;
+    }
+    if (!next_fs) {
+      next_fs = static_cast<const char*>(::memchr(src, '/', end - src));
+      next_fs = next_fs ? next_fs : end;
+    }
+    const char*& next_sep = next_fs < next_bs ? next_fs : next_bs;
 
     // Position for next loop iteration.
     src_next = next_sep != end ? next_sep + 1 : end;
     // Length of the component, excluding trailing directory.
     const std::size_t component_len = next_sep - src;
+
+    // Reset either `next_fs` or `next_bs` to search in the next iteration.
+    next_sep = nullptr;
 #endif
 
     // Handle the common case first.
@@ -276,9 +300,30 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
 
   *len = dst - start;  // dst points after the trailing char here.
 #ifdef _WIN32
-  uint64_t bits = 0;
-  uint64_t bits_mask = 1;
+  // Fast path for all forwardslashes
+  if (!first_bs && !::memchr(start, '\\', unknown_slashes_end - start)) {
+    *slash_bits = 0;
+    return;
+  }
 
+  // Medium-slow path for all backslashes
+  if (!first_fs && !::memchr(start, '/', unknown_slashes_end - start)) {
+    char* bs = static_cast<char*>(::memchr(start, '\\', dst - start));
+    std::size_t bs_count = 0;
+    while (bs) {
+      ++bs_count;
+      *bs++ = '/';
+      bs = static_cast<char*>(::memchr(bs, '\\', dst - bs));
+    }
+    *slash_bits = bs_count >= 64
+                      ? ~std::uint64_t(0)
+                      : (static_cast<std::uint64_t>(1) << (bs_count)) - 1;
+    return;
+  }
+
+  // Slow path for a mixture of slashes
+  std::uint64_t bits = 0;
+  std::uint64_t bits_mask = 1;
   for (char* c = start; c != dst; ++c) {
     switch (*c) {
       case '\\':
