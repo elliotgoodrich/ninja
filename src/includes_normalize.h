@@ -29,8 +29,7 @@ struct IncludesNormalize {
   // Internal utilities made available for testing, maybe useful otherwise.
   static void AbsPath(std::string* s, std::string* err);
   static void Relativize(std::string* abs_path,
-                         const std::vector<StringPiece>& start_list,
-                         std::string* err);
+                         const std::vector<StringPiece>& start_list);
 
   /// Normalize by fixing slashes style, fixing redundant .. and . and makes the
   /// path |input| relative to |this->relative_to_| and store to |result|.

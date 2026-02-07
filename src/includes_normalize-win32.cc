@@ -203,21 +203,19 @@ struct StringPieceRange {
 
 IncludesNormalize::IncludesNormalize(const StringPiece& relative_to)
  : relative_to_(relative_to.str_, relative_to.len_) {
+  std::uint64_t slash_bits;
+  CanonicalizePath(&relative_to_, &slash_bits);
   string err;
   AbsPath(&relative_to_, &err);
   if (!err.empty()) {
     Fatal("Initializing IncludesNormalize(): %s", err.c_str());
   }
-  split_relative_to_ = SplitStringPiece(relative_to_, '/');
+  const StringPieceRange components(relative_to_, '/');
+  split_relative_to_.assign(components.begin(), components.end());
 }
 
 void IncludesNormalize::AbsPath(std::string *s, string* err) {
   if (IsFullPathName(*s)) {
-    for (char& ch : *s) {
-      if (ch == '\\') {
-        ch = '/';
-      }
-    }
     return;
   }
 
@@ -233,8 +231,8 @@ void IncludesNormalize::AbsPath(std::string *s, string* err) {
   s->assign(result, c);
 }
 
-void IncludesNormalize::Relativize(
-    std::string *abs_path, const vector<StringPiece>& start_list, string* err) {
+void IncludesNormalize::Relativize(std::string* abs_path,
+                                   const vector<StringPiece>& start_list) {
   AssertIsAbsoluteInDebug(*abs_path);
 
   const StringPieceRange path_list(*abs_path, '/');
@@ -268,14 +266,14 @@ void IncludesNormalize::Relativize(
 bool IncludesNormalize::Normalize(const StringPiece& input,
                                   string* result, string* err) const {
   char copy[_MAX_PATH + 1];
-  size_t len = input.size();
+  std::size_t len = input.size();
   if (len > _MAX_PATH) {
     *err = "path too long";
     return false;
   }
   strncpy(copy, input.str_, input.len_);
   copy[len] = '\0';
-  uint64_t slash_bits;
+  std::uint64_t slash_bits;
   CanonicalizePath(copy, &len, &slash_bits);
   result->assign(copy, len);
   AbsPath(result, err);
@@ -288,8 +286,6 @@ bool IncludesNormalize::Normalize(const StringPiece& input,
     result->assign(copy, len);
     return true;
   }
-  Relativize(result, split_relative_to_, err);
-  if (!err->empty())
-    return false;
+  Relativize(result, split_relative_to_);
   return true;
 }
