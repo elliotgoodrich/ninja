@@ -21,7 +21,6 @@
 struct StringPiece;
 
 /// Utility functions for normalizing include paths on Windows.
-/// TODO: this likely duplicates functionality of CanonicalizePath; refactor.
 struct IncludesNormalize {
   /// Normalize path relative to |relative_to|.
   IncludesNormalize(const StringPiece& relative_to);

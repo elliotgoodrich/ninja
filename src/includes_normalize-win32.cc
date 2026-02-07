@@ -30,7 +30,7 @@ using namespace std;
 namespace {
 
 bool InternalGetFullPathName(const char *file_name, char* buffer,
-                             size_t buffer_length, string *err) {
+                             std::size_t buffer_length, std::size_t* new_len, string *err) {
   DWORD result_size = GetFullPathNameA(file_name,
                                        buffer_length, buffer, NULL);
   if (result_size == 0) {
@@ -42,6 +42,9 @@ bool InternalGetFullPathName(const char *file_name, char* buffer,
   } else if (result_size > buffer_length) {
     *err = "path too long";
     return false;
+  }
+  if (new_len) {
+    *new_len = result_size;
   }
   return true;
 }
@@ -81,15 +84,16 @@ bool SameDrive(const std::string& a, const std::string& b, string* err)  {
 
   char a_absolute[_MAX_PATH];
   char b_absolute[_MAX_PATH];
-  if (!InternalGetFullPathName(a.c_str(), a_absolute, sizeof(a_absolute), err)) {
+  if (!InternalGetFullPathName(a.c_str(), a_absolute, sizeof(a_absolute),
+                               nullptr, err)) {
     return false;
   }
   if (!InternalGetFullPathName(b.c_str(), b_absolute, sizeof(b_absolute),
-                               err)) {
+                               nullptr, err)) {
     return false;
   }
-  char a_drive[_MAX_DIR];
-  char b_drive[_MAX_DIR];
+  char a_drive[_MAX_DRIVE];
+  char b_drive[_MAX_DRIVE];
   _splitpath(a_absolute, a_drive, NULL, NULL, NULL);
   _splitpath(b_absolute, b_drive, NULL, NULL, NULL);
   return _stricmp(a_drive, b_drive) == 0;
@@ -219,16 +223,20 @@ void IncludesNormalize::AbsPath(std::string *s, string* err) {
     return;
   }
 
+  std::size_t len;
   char result[_MAX_PATH];
-  if (!InternalGetFullPathName(s->c_str(), result, sizeof(result), err)) {
+  if (!InternalGetFullPathName(s->c_str(), result, sizeof(result), &len, err)) {
     s->clear();
     return;
   }
-  char* c = result;
-  for (; *c; ++c)
-    if (*c == '\\')
-      *c = '/';
-  s->assign(result, c);
+
+  char* bs = result;
+  const char* end = result + len;
+  while ((bs = static_cast<char*>(memchr(bs, '\\', end - bs))) !=
+         nullptr) {
+    *bs++ = '/';
+  }
+  s->assign(result, len);
 }
 
 void IncludesNormalize::Relativize(std::string* abs_path,
@@ -236,30 +244,46 @@ void IncludesNormalize::Relativize(std::string* abs_path,
   AssertIsAbsoluteInDebug(*abs_path);
 
   const StringPieceRange path_list(*abs_path, '/');
-  const auto diff =
-      std::mismatch(path_list.begin(), path_list.end(), start_list.begin(),
-                    start_list.end(), EqualsCaseInsensitiveASCII);
-  const size_t sections_to_replace = start_list.end() - diff.second;
-  const StringPiece dotdot = "../";
-  const size_t bytes_to_write = sections_to_replace * dotdot.size();
-  const size_t bytes_to_delete = diff.first->str_ - abs_path->data();
-  if (bytes_to_write > bytes_to_delete) {
-    // We can insert chars at any position from
-    // [begin(), begin() + bytes_to_delete) so we choose the last
-    // element to minimize copying
-    abs_path->insert(abs_path->begin() + bytes_to_delete,
-                     bytes_to_write - bytes_to_delete, '\0');
-  } else if (bytes_to_write < bytes_to_delete) {
-    abs_path->erase(abs_path->begin(),
-                    abs_path->begin() + bytes_to_delete - bytes_to_write);
-  }
-  auto it = abs_path->begin();
-  for (size_t i = 0; i < sections_to_replace; ++i) {
-    it = std::copy(dotdot.begin(), dotdot.end(), it);
+
+  // `Relativize` only callable when `abs_path` and `start_list` are on the
+  // same drive.  Skip comparing them each time and start from the 2nd component.
+  assert(EqualsCaseInsensitiveASCII(*path_list.begin(), *start_list.begin()));
+  const auto diff = std::mismatch(std::next(path_list.begin()), path_list.end(),
+                                  std::next(start_list.begin()),
+                                  start_list.end(), EqualsCaseInsensitiveASCII);
+
+  // The length of the common path prefix, in abs_path characters.
+  const std::size_t common_prefix_len =
+      (diff.first == path_list.end()) ? abs_path->size()
+                                      : diff.first->str_ - abs_path->data();
+
+  // The number of ../ to be inserted at the start of the result, corresponding
+  // to the number of path segments after the common prefix from start_list.
+  const std::size_t dotdot_count = start_list.end() - diff.second;
+
+  const std::size_t dotdot_len = 3 * dotdot_count;
+
+  // The following must remove the common prefix characters, then prepend
+  // a sequence of |dotdot_count| "../" segments into the result. The end result
+  // is [<dotdot_len>][<non_common_path>].
+
+  // First relocate the non common path to the right position, removing
+  // or inserting bytes if needed.
+  if (common_prefix_len > dotdot_len) {
+    abs_path->erase(0, common_prefix_len - dotdot_len);
+  } else if (common_prefix_len < dotdot_len) {
+    abs_path->insert(0, dotdot_len - common_prefix_len, '\0');
   }
 
   if (abs_path->empty()) {
     *abs_path = '.';
+  } else {
+    // Now write the ../ sequence in place.
+    char* data = &*abs_path->begin();
+    for (std::size_t remaining = dotdot_count; remaining > 0; --remaining) {
+      memcpy(data, "../", 3);
+      data += 3;
+    }
   }
 }
 
