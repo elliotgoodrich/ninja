@@ -156,11 +156,13 @@ struct StringPieceRange {
 
     const_iterator& operator++() {
       if (str_.end() == end_) {
-        str_ = StringPiece(str_.end(), 0);
+        str_ = StringPiece();
       } else {
-        const auto start = str_.end() + 1;
-        const auto sep_it = std::find(start, end_, sep_);
-        str_ = StringPiece(start, sep_it - start);
+        const char* start = str_.end() + 1;
+        const char* slash =
+            static_cast<const char*>(memchr(start, '/', end_ - start));
+        const std::size_t len = slash ? slash - start : end_ - start;
+        str_ = StringPiece(start, len);
       }
       return *this;
     }
@@ -190,13 +192,14 @@ struct StringPieceRange {
     : str_(str), sep_(sep) {}
 
   const_iterator begin() const {
-    const auto it = std::find(str_.begin(), str_.end(), sep_);
-    return const_iterator(StringPiece(str_.begin(), it - str_.begin()),
-                          str_.end(), sep_);
+    const char* slash =
+        static_cast<const char*>(memchr(str_.begin(), '/', str_.size()));
+    const std::size_t len = slash ? slash - str_.begin() : str_.size();
+    return const_iterator(StringPiece(str_.begin(), len), str_.end(), sep_);
   }
 
   const_iterator end() const {
-    return const_iterator(StringPiece(str_.end(), 0), str_.end(), sep_);
+    return const_iterator(StringPiece(), str_.end(), sep_);
   }
 
   StringPiece str_;
