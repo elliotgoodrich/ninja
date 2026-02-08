@@ -49,10 +49,6 @@ bool InternalGetFullPathName(const char *file_name, char* buffer,
   return true;
 }
 
-bool IsPathSeparator(char c) {
-  return c == '/' ||  c == '\\';
-}
-
 // Return true if paths a and b are on the same windows drive.
 // Return false if this function cannot check
 // whether or not on the same windows drive.
@@ -73,7 +69,7 @@ bool SameDriveFast(const StringPiece& a, const StringPiece& b) {
     return false;
   }
 
-  return IsPathSeparator(a[2]) && IsPathSeparator(b[2]);
+  return a[2] == '/' && b[2] == '/';
 }
 
 // Return true if paths a and b are on the same Windows drive.
@@ -103,33 +99,7 @@ bool SameDrive(const std::string& a, const std::string& b, string* err)  {
 // This ignores difference of path separator.
 // This is used not to call very slow GetFullPathName API.
 bool IsFullPathName(StringPiece s) {
-  if (s.size() < 3 ||
-      !islatinalpha(s[0]) ||
-      s[1] != ':' ||
-      !IsPathSeparator(s[2])) {
-    return false;
-  }
-
-  // Check "." or ".." is contained in path.
-  for (size_t i = 2; i < s.size(); ++i) {
-    if (!IsPathSeparator(s[i])) {
-      continue;
-    }
-
-    // Check ".".
-    if (i + 1 < s.size() && s[i+1] == '.' &&
-        (i + 2 >= s.size() || IsPathSeparator(s[i+2]))) {
-      return false;
-    }
-
-    // Check "..".
-    if (i + 2 < s.size() && s[i+1] == '.' && s[i+2] == '.' &&
-        (i + 3 >= s.size() || IsPathSeparator(s[i+3]))) {
-      return false;
-    }
-  }
-
-  return true;
+  return s.size() >= 3 && islatinalpha(s[0]) && s[1] == ':' && s[2] == '/';
 }
 
 #ifdef NDEBUG
@@ -233,6 +203,7 @@ void IncludesNormalize::AbsPath(std::string *s, string* err) {
     return;
   }
 
+  // Fixup all backslashes with forward slashes introduced with `GetFullPathNameA`.
   char* bs = result;
   const char* end = result + len;
   while ((bs = static_cast<char*>(memchr(bs, '\\', end - bs))) !=
