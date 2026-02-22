@@ -66,6 +66,11 @@ void Info(const char* msg, va_list ap);
 void CanonicalizePath(std::string* path, uint64_t* slash_bits);
 void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits);
 
+void CanonicalizePath2(std::string* path, uint64_t* slash_bits);
+void CanonicalizePath2(char* path, size_t* len, uint64_t* slash_bits);
+void CanonicalizePath3(std::string* path, uint64_t* slash_bits);
+void CanonicalizePath3(char* path, size_t* len, uint64_t* slash_bits);
+
 /// Appends |input| to |*result|, escaping according to the whims of either
 /// Bash, or Win32's CommandLineToArgvW().
 /// Appends the string directly to |result| without modification if we can

@@ -145,6 +145,7 @@ add_library(libninja OBJECT
 	src/manifest_parser.cc
 	src/metrics.cc
 	src/missing_deps.cc
+	src/all.natvis
 	src/parser.cc
 	src/real_command_runner.cc
 	src/state.cc
