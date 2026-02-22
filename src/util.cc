@@ -25,6 +25,7 @@
 #endif
 
 #include <assert.h>
+#include <array>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -70,7 +71,8 @@ namespace {
 const std::uint64_t msb{ 0x80'80'80'80'80'80'80'80ull };
 const std::uint64_t lsb{ 0x01'01'01'01'01'01'01'01ull };
 
-__forceinline std::uint64_t unrolled_equal(const std::uint64_t* lhs, std::uint64_t rhs) {
+__forceinline std::uint64_t unrolled_equal(const std::array<std::uint64_t, 8>& lhs, std::uint8_t c) {
+  const std::uint64_t rhs = 0x0101010101010101ull * c;
     const std::uint64_t zero_if_equal[] = {
          lhs[0] ^ rhs,
          lhs[1] ^ rhs,
@@ -81,50 +83,12 @@ __forceinline std::uint64_t unrolled_equal(const std::uint64_t* lhs, std::uint64
          lhs[6] ^ rhs,
          lhs[7] ^ rhs,
     };
+
     const std::uint64_t MAGIC = 0x02'04'08'10'20'40'81ull;
 #define EQUAL_TEST(I) ((((~(zero_if_equal[I] | ((zero_if_equal[I] | msb) - lsb)) & msb) * MAGIC) >> 56) << (I * 8))
-  return EQUAL_TEST(0) | EQUAL_TEST(1) | EQUAL_TEST(2) | EQUAL_TEST(3) | EQUAL_TEST(4) | EQUAL_TEST(5) | EQUAL_TEST(6) | EQUAL_TEST(7);
-}
-
-__forceinline std::uint64_t uint64_t_equal(std::uint64_t lhs, std::uint64_t rhs) {
-  const std::uint64_t zero_if_equal = lhs ^ rhs;
-#if 0
-  const std::uint64_t A = zero_if_equal | msb;
-  const std::uint64_t B = A - lsb;
-  const std::uint64_t C = zero_if_equal | B;
-  const std::uint64_t D = ~C;
-  const std::uint64_t FINAL = D & msb;
-  return FINAL;
-#endif
-  return (~(zero_if_equal | ((zero_if_equal | msb) - lsb)) & msb);
-}
-
-template <typename T>
-__forceinline std::uint64_t combine(const std::uint64_t* x, T&& thing) {
-  return (thing(x[0]) << 0ull) | (thing(x[1]) << 8ull) |
-         (thing(x[2]) << 16ull) | (thing(x[3]) << 24ull) |
-         (thing(x[4]) << 32ull) | (thing(x[5]) << 40ull) |
-         (thing(x[6]) << 48ull) | (thing(x[7]) << 56ull);
-}
-
-__forceinline std::uint8_t get_equal_bytes(std::uint64_t lhs, std::uint64_t rhs) {
-  const std::uint64_t equal = uint64_t_equal(lhs, rhs);
-  return (equal * 0x02'04'08'10'20'40'81ull) >> 56;
-}
-
-__forceinline std::uint64_t backslash_mask_u64(std::uint64_t v) {
-  constexpr std::uint64_t BS{ 0x5C5C5C5C5C5C5C5CULL };
-  return get_equal_bytes(v, BS);
-}
-
-__forceinline std::uint64_t slash_mask_u64(std::uint64_t v) {
-  constexpr std::uint64_t SLASH{ 0x2F2F2F2F2F2F2F2FULL };
-  return get_equal_bytes(v, SLASH);
-}
-
-__forceinline std::uint64_t dot_mask_u64(std::uint64_t v) {
-  constexpr std::uint64_t DOT{ 0x2e2e2e2e2e2e2e2eULL };
-  return get_equal_bytes(v, DOT);
+#define EQUAL_TEST(I) ((((~(zero_if_equal[I] | ((zero_if_equal[I] | msb) - lsb)) & msb) * MAGIC) >> 56) << (I * 8))
+    return EQUAL_TEST(0) | EQUAL_TEST(1) | EQUAL_TEST(2) | EQUAL_TEST(3) | 
+           EQUAL_TEST(4) | EQUAL_TEST(5) | EQUAL_TEST(6) | EQUAL_TEST(7);
 }
 
 void disambiguation(char* path, std::size_t* len, std::uint64_t* slash_bits) {
@@ -478,42 +442,50 @@ void CanonicalizePath2(string* path, uint64_t* slash_bits) {
 void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   const char* src = path;
   char* dst = path;
+  const char* dst_start = dst;
   std::size_t remaining = *len;
   std::uint64_t previous_slashes = 1; // tODO, update
-  while (remaining) {
-    std::uint64_t buffer[8] = {
-      0x2f'2f'2f'2f'2f'2f'2f'2f, 0x2f'2f'2f'2f'2f'2f'2f'2f,
-      0x2f'2f'2f'2f'2f'2f'2f'2f, 0x2f'2f'2f'2f'2f'2f'2f'2f,
-      0x2f'2f'2f'2f'2f'2f'2f'2f, 0x2f'2f'2f'2f'2f'2f'2f'2f,
-      0x2f'2f'2f'2f'2f'2f'2f'2f, 0x2f'2f'2f'2f'2f'2f'2f'2f,
-    };
-    const std::size_t chunk = std::min<std::size_t>(64, remaining);
-    remaining -= chunk;
-    std::memcpy(&buffer, src, chunk);
+  std::uint64_t previous_dots = 0;
 
-    // Remember what trailing slashes we have and mark them in this bitfield
-    // "abcde" -> "00000111"
-    const std::uint64_t padding_to_remove =
-        chunk == 64 ? 0 : ~((static_cast<std::uint64_t>(1) << chunk) - 1);
+  while (remaining) {
+    std::array<std::uint64_t, 8> buffer;
+    std::uint64_t padding_to_remove;
+    if (remaining > 64) {
+      remaining -= 64;
+      std::memcpy(&buffer, src, 64);
+      padding_to_remove = 0;
+    }
+    else {
+      buffer = {
+        0x2f'2f'2f'2f'2f'2f'2f'2f, 0x2f'2f'2f'2f'2f'2f'2f'2f,
+        0x2f'2f'2f'2f'2f'2f'2f'2f, 0x2f'2f'2f'2f'2f'2f'2f'2f,
+        0x2f'2f'2f'2f'2f'2f'2f'2f, 0x2f'2f'2f'2f'2f'2f'2f'2f,
+        0x2f'2f'2f'2f'2f'2f'2f'2f, 0x2f'2f'2f'2f'2f'2f'2f'2f,
+      };
+      padding_to_remove = ~((static_cast<std::uint64_t>(1) << remaining) - 1);
+      std::memcpy(&buffer, src, remaining);
+      remaining = 0;
+    }
 
     const std::uint64_t slash_bits =
 #ifdef _WIN32
-        unrolled_equal(buffer, 0x5c5c5c5c5c5c5c5cull) |
+        unrolled_equal(buffer, '\\') |
 #endif
-        unrolled_equal(buffer, 0x2f2f2f2f2f2f2f2full);
-    const std::uint64_t dot_bits =
-        unrolled_equal(buffer, 0x2e2e2e2e2e2e2e2eull);
+        unrolled_equal(buffer, '/');
+    const std::uint64_t dot_bits = unrolled_equal(buffer, '.');
 
-        // Look at empty paths
-    const std::uint64_t empty_paths_to_remove = slash_bits & (slash_bits >> 1u) ;
+    // Look at empty paths
+    const std::uint64_t empty_paths_to_remove =
+        slash_bits & ((slash_bits << 1u) | previous_slashes);
 
     // Look at current path /./
-
-    // TODO: previous slashes
     const std::uint64_t current_path_indicator =
-        ((slash_bits << 2u) | (previous_slashes << 1u)) & (dot_bits << 1u) & slash_bits;
+        ((slash_bits << 2u) | (previous_slashes << 1u)) &
+        ((dot_bits << 1u) | previous_dots) & slash_bits;
     const std::uint64_t current_path_to_remove =
         current_path_indicator | (current_path_indicator >> 1u);
+
+    // TODO: Look at parent path /../
 
     std::uint64_t to_skip =
         padding_to_remove | empty_paths_to_remove | current_path_to_remove;
@@ -521,107 +493,44 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     unsigned long start = 0;
     unsigned long end;
     // If we can find a set bit
+    // 11111111110000
     while (_BitScanForward64(&end, to_skip)) {
       const std::size_t size = end - start;
-      //std::memcpy(dst, reinterpret_cast<const char*>(&buffer) + start, size);
+      std::memcpy(dst, reinterpret_cast<const char*>(&buffer) + start, size);
       dst += size;
       // Mark all the chars we just copied as skippable
       to_skip += static_cast<std::uint64_t>(1) << end;
       if (_BitScanForward64(&start, to_skip)) {
         to_skip ^= static_cast<std::uint64_t>(1) << start;
       } else {
-        start = chunk;
-        break;
+        start = 64;
+        goto no_need_to_copy;
       }
     }
     // Copy the remaining
-    const std::size_t size = chunk - start;
-    //std::memcpy(dst, reinterpret_cast<const char*>(&buffer) + start, size);
+    const std::size_t size = 64 - start;
+    std::memcpy(dst, reinterpret_cast<const char*>(&buffer) + start, size);
     dst += size;
-    src += chunk;
+    no_need_to_copy:
+    src += 64;
+    previous_slashes = slash_bits;
+    previous_dots = dot_bits;
   }
   
+  // TODO: make SWAR?
+
+  // Remove trailing path separator if any, but keep the initial
+  // path separator(s) if there was one (or two on Windows).
+  if (dst > dst_start && IsPathSeparator(dst[-1]))
+    dst--;
+
+  if (dst == path) {
+    // Handle special cases like "aa/.." -> "."
+    *dst++ = '.';
+  }
   *len = dst - path;
 }
 
-
-void CanonicalizePath3(string* path, uint64_t* slash_bits) {
-  std::size_t len = path->size();
-  if (len > 0) {
-    char* str = &(*path)[0];
-    CanonicalizePath3(str, &len, slash_bits);
-    path->erase(path->begin() + len, path->end());
-  }
-}
-
-void CanonicalizePath3(char* path, std::size_t* len, std::uint64_t* slash_bit) {
-  const char* src = path;
-  char* dst = path;
-  std::size_t remaining = *len;
-  std::uint64_t previous_slashes = 1;
-  while (remaining) {
-    std::uint64_t buffer[8] = {
-      0x2f'2f'2f'2f'2f'2f'2f'2f, 0x2f'2f'2f'2f'2f'2f'2f'2f,
-      0x2f'2f'2f'2f'2f'2f'2f'2f, 0x2f'2f'2f'2f'2f'2f'2f'2f,
-      0x2f'2f'2f'2f'2f'2f'2f'2f, 0x2f'2f'2f'2f'2f'2f'2f'2f,
-      0x2f'2f'2f'2f'2f'2f'2f'2f, 0x2f'2f'2f'2f'2f'2f'2f'2f,
-    };
-    const std::size_t chunk = std::min<std::size_t>(64, remaining);
-    remaining -= chunk;
-    std::memcpy(&buffer, src, chunk);
-
-    // Remember what trailing slashes we have and mark them in this bitfield
-    // "abcde" -> "00000111"
-    const std::uint64_t padding_to_remove =
-        chunk == 64 ? 0 : ~((static_cast<std::uint64_t>(1) << chunk) - 1);
-
-    const std::uint64_t slash_bits =
-#ifdef _WIN32
-        unrolled_equal(buffer, 0x5c5c5c5c5c5c5c5cull) |
-#endif
-        unrolled_equal(buffer, 0x2f2f2f2f2f2f2f2full);
-    const std::uint64_t dot_bits =
-        unrolled_equal(buffer, 0x2e2e2e2e2e2e2e2eull);
-
-        // Look at empty paths
-    const std::uint64_t empty_paths_to_remove = slash_bits & (slash_bits >> 1u) ;
-
-    // Look at current path /./
-
-    // TODO: previous slashes
-    const std::uint64_t current_path_indicator =
-        ((slash_bits << 2u) | (previous_slashes << 1u)) & (dot_bits << 1u) & slash_bits;
-    const std::uint64_t current_path_to_remove =
-        current_path_indicator | (current_path_indicator >> 1u);
-
-    std::uint64_t to_skip =
-        padding_to_remove | empty_paths_to_remove | current_path_to_remove;
-
-    unsigned long start = 0;
-    unsigned long end;
-    // If we can find a set bit
-    while (_BitScanForward64(&end, to_skip)) {
-      const std::size_t size = end - start;
-      //std::memcpy(dst, reinterpret_cast<const char*>(&buffer) + start, size);
-      dst += size;
-      // Mark all the chars we just copied as skippable
-      to_skip += static_cast<std::uint64_t>(1) << end;
-      if (_BitScanForward64(&start, to_skip)) {
-        to_skip ^= static_cast<std::uint64_t>(1) << start;
-      } else {
-        start = chunk;
-        break;
-      }
-    }
-    // Copy the remaining
-    const std::size_t size = chunk - start;
-    //std::memcpy(dst, reinterpret_cast<const char*>(&buffer) + start, size);
-    dst += size;
-    src += chunk;
-  }
-  
-  *len = dst - path;
-}
 
 static inline bool IsKnownShellSafeCharacter(char ch) {
   if ('A' <= ch && ch <= 'Z') return true;

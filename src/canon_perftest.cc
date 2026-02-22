@@ -191,7 +191,7 @@ __forceinline std::uint64_t dot_mask_u64(SWAR v) {
 #endif
 }
 
-void disambiguation(char* path, std::size_t* len, std::uint64_t* slash_bits) {
+void disambiguation2(char* path, std::size_t* len, std::uint64_t* slash_bits) {
   // Disambiguate between overloads of CanonicalizePath
   CanonicalizePath2(path, len, slash_bits);
 }
@@ -547,10 +547,9 @@ int main() {
 
   std::string pathCopies;
   pathCopies.resize(kNumRepetitions * max_size);
-  //runBenchmarks(CanonicalizePathOriginal, "CanonicalizePathOriginal", pathCopies);
-  //runBenchmarks(disambiguation, "CanonicalizePathCurrent", pathCopies);
+  runBenchmarks(disambiguation2, "CanonicalizePath2", pathCopies);
+  runBenchmarks(CanonicalizePathOriginal, "CanonicalizePathOriginal", pathCopies);
   //runBenchmarks(CheatyPath, "CheatyPath", pathCopies);
-  runBenchmarks(disambiguation, "CanonicalPath2", pathCopies);
 
   // add additional implementations here for comparison
 }
