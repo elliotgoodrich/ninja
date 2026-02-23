@@ -47,7 +47,7 @@ const std::string kPaths[] = {
   "third_party//WebKit///Source/WebCore/"
   "platform/leveldb/LevelDBWriteBatch.cpp",
 
-#if 0
+#if 1
   // Handle the same paths again but with backslashes
   // Relative
   "third_party\\WebKit\\Source\\WebCore\\"

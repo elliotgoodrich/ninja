@@ -71,7 +71,23 @@ namespace {
 const std::uint64_t msb{ 0x80'80'80'80'80'80'80'80ull };
 const std::uint64_t lsb{ 0x01'01'01'01'01'01'01'01ull };
 
-__forceinline std::uint64_t unrolled_equal(const std::array<std::uint64_t, 8>& lhs, std::uint8_t c) {
+std::array<std::uint64_t, 8> equal(const std::array<std::uint64_t, 8>& lhs,
+                                   std::uint8_t c) {
+  const std::uint64_t rhs = 0x0101010101010101ull * c;
+  const std::array<std::uint64_t, 8> zero_if_equal = {
+    lhs[0] ^ rhs, lhs[1] ^ rhs, lhs[2] ^ rhs, lhs[3] ^ rhs,
+    lhs[4] ^ rhs, lhs[5] ^ rhs, lhs[6] ^ rhs, lhs[7] ^ rhs,
+  };
+  const std::array<std::uint64_t, 8> result = {
+#define EQUAL_TEST(I) \
+  (~(zero_if_equal[I] | ((zero_if_equal[I] | msb) - lsb)) & msb)
+    EQUAL_TEST(0), EQUAL_TEST(1), EQUAL_TEST(2), EQUAL_TEST(3),
+    EQUAL_TEST(4), EQUAL_TEST(5), EQUAL_TEST(6), EQUAL_TEST(7),
+  };
+  return result;
+}
+
+std::uint64_t unrolled_equal(const std::array<std::uint64_t, 8>& lhs, std::uint8_t c) {
   const std::uint64_t rhs = 0x0101010101010101ull * c;
     const std::uint64_t zero_if_equal[] = {
          lhs[0] ^ rhs,
@@ -84,11 +100,31 @@ __forceinline std::uint64_t unrolled_equal(const std::array<std::uint64_t, 8>& l
          lhs[7] ^ rhs,
     };
 
+#if 0
     const std::uint64_t MAGIC = 0x02'04'08'10'20'40'81ull;
 #define EQUAL_TEST(I) ((((~(zero_if_equal[I] | ((zero_if_equal[I] | msb) - lsb)) & msb) * MAGIC) >> 56) << (I * 8))
-#define EQUAL_TEST(I) ((((~(zero_if_equal[I] | ((zero_if_equal[I] | msb) - lsb)) & msb) * MAGIC) >> 56) << (I * 8))
+#else
+#define EQUAL_TEST(I)                                                 \
+    _pext_u64(~(zero_if_equal[I] | ((zero_if_equal[I] | msb) - lsb)), \
+              0x80'80'80'80'80'80'80'80ull)                           \
+        << (I * 8)
+#endif
     return EQUAL_TEST(0) | EQUAL_TEST(1) | EQUAL_TEST(2) | EQUAL_TEST(3) | 
            EQUAL_TEST(4) | EQUAL_TEST(5) | EQUAL_TEST(6) | EQUAL_TEST(7);
+}
+
+void convert_backslashes(std::uint64_t* text,
+                         std::array<std::uint64_t, 8> backslashes_msb) {
+#define EQUAL_TEST(I) text[I] ^= (backslashes_msb[I] >> 7) * 0x73ull;
+
+  EQUAL_TEST(0);
+  EQUAL_TEST(1);
+  EQUAL_TEST(2);
+  EQUAL_TEST(3);
+  EQUAL_TEST(4);
+  EQUAL_TEST(5);
+  EQUAL_TEST(6);
+  EQUAL_TEST(7);
 }
 
 void disambiguation(char* path, std::size_t* len, std::uint64_t* slash_bits) {
@@ -444,8 +480,22 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   char* dst = path;
   const char* dst_start = dst;
   std::size_t remaining = *len;
-  std::uint64_t previous_slashes = 1; // tODO, update
+  std::uint64_t previous_slashes = 1;
   std::uint64_t previous_dots = 0;
+
+  std::uint64_t mutable_chars = 0xff'ff'ff'ff'ff'ff'ff'ffull;
+  // TODO: Use this to preserve the initial slash (or double slash on windows)
+  // for absolute paths.
+  if (remaining >= 1 && IsPathSeparator(src[0])) {
+    if (remaining >= 2 && IsPathSeparator(src[1])) {
+      mutable_chars = ~static_cast<std::uint64_t>(0b11);
+      dst_start += 2;
+    }
+    else {
+      mutable_chars = ~static_cast<std::uint64_t>(0b1);
+      dst_start += 1;
+    }
+  }
 
   while (remaining) {
     std::array<std::uint64_t, 8> buffer;
@@ -467,12 +517,18 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
       remaining = 0;
     }
 
+#ifdef _WIN32
+    std::array<std::uint64_t, 8> backslashes = equal(buffer, '\\');
+#endif
+
     const std::uint64_t slash_bits =
 #ifdef _WIN32
         unrolled_equal(buffer, '\\') |
 #endif
         unrolled_equal(buffer, '/');
     const std::uint64_t dot_bits = unrolled_equal(buffer, '.');
+
+    convert_backslashes(buffer.data(), backslashes);
 
     // Look at empty paths
     const std::uint64_t empty_paths_to_remove =
@@ -488,7 +544,8 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     // TODO: Look at parent path /../
 
     std::uint64_t to_skip =
-        padding_to_remove | empty_paths_to_remove | current_path_to_remove;
+        mutable_chars &
+        (padding_to_remove | empty_paths_to_remove | current_path_to_remove);
 
     unsigned long start = 0;
     unsigned long end;
@@ -515,6 +572,7 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     src += 64;
     previous_slashes = slash_bits;
     previous_dots = dot_bits;
+    mutable_chars = ~static_cast<std::uint64_t>(0);
   }
   
   // TODO: make SWAR?

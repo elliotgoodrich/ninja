@@ -16,7 +16,7 @@
 
 int main(int argc, char **argv) {
   argc = 2;
-  char* next[] = { argv[0], "--gtest_filter=*CanonicalizePath2.*",
+  char* next[] = { argv[0], "--gtest_filter=*CanonicalizePath.*",
                    nullptr };
   argv = next;
   testing::InitGoogleTest(&argc, argv);
