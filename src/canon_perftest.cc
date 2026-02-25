@@ -196,6 +196,11 @@ void disambiguation2(char* path, std::size_t* len, std::uint64_t* slash_bits) {
   CanonicalizePath2(path, len, slash_bits);
 }
 
+void disambiguation3(char* path, std::size_t* len, std::uint64_t* slash_bits) {
+  // Disambiguate between overloads of CanonicalizePath
+  CanonicalizePath3(path, len, slash_bits);
+}
+
 /*
 What's the plan?
 
@@ -548,6 +553,7 @@ int main() {
   std::string pathCopies;
   pathCopies.resize(kNumRepetitions * max_size);
   runBenchmarks(disambiguation2, "CanonicalizePath2", pathCopies);
+  runBenchmarks(disambiguation3, "CanonicalizePath3", pathCopies);
   runBenchmarks(CanonicalizePathOriginal, "CanonicalizePathOriginal", pathCopies);
   //runBenchmarks(CheatyPath, "CheatyPath", pathCopies);
 
