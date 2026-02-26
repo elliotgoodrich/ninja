@@ -227,12 +227,12 @@ TEST(CanonicalizePath, SlashTracking) {
   uint64_t slash_bits;
 
   path = "foo.h";
-  CanonicalizePath(&path, &slash_bits);
+  CanonicalizePath2(&path, &slash_bits);
   EXPECT_EQ("foo.h", path);
   EXPECT_EQ(0, slash_bits);
 
   path = "a\\foo.h";
-  CanonicalizePath(&path, &slash_bits);
+  CanonicalizePath2(&path, &slash_bits);
   EXPECT_EQ("a/foo.h", path);
   EXPECT_EQ(1, slash_bits);
 
