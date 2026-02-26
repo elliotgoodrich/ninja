@@ -642,36 +642,19 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
 
     // TODO: Look at parent path /../
 
+    const std::uint64_t to_remove = (padding_to_remove | empty_paths_to_remove | current_path_to_remove);
+    const std::uint64_t to_keep = ~to_remove;
+
     // Calculate slash_bits
 #if NEED_BACKSLASH 
-    if (backslash_bits) {
-      if (forwardslash_bits) {
-        // Slow path
-      } else {
-        const std::int64_t backslash_count = __popcnt64(backslash_bits);
-
-        // We cannot get consecutive slashes because they are removed.
-        // The most slashes is when we have "/a/a.../a/a" and every other
-        // character is a slash.
-        assert(backslash_count <= 32);
-        // TODO: Check slash_count won't overflow;
-        if (slash_count < 64) {
-          output_slashes |=
-              ((static_cast<std::uint64_t>(1) << backslash_count) - 1)
-              << slash_count;
-        }
-        slash_count += backslash_count;
-      }
-    } else
-#endif
-    if (forwardslash_bits) {
-      slash_count += __popcnt64(backslash_bits);
+    if (slash_count < 64) {
+      output_slashes |= _pext_u64(to_keep & backslash_bits, to_keep & slash_bits) << slash_count;
+      slash_count += __popcnt64(slash_bits);
     }
+#endif
 
     // Copy things
-    std::uint64_t to_skip =
-        mutable_chars &
-        (padding_to_remove | empty_paths_to_remove | current_path_to_remove);
+    std::uint64_t to_skip = mutable_chars & to_remove;
 
     unsigned long start = 0;
     unsigned long end;

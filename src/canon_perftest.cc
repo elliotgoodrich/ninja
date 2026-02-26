@@ -487,7 +487,7 @@ void CanonicalizePathOriginal(char* path, size_t* len, uint64_t* slash_bits) {
 }
 
 const int kNumRepetitions = 1000000;
-const int kNumRepeats = 10;
+const int kNumRepeats = 20;
 
 template <typename CANONICALIZE_PATH>
 void runBenchmarks(CANONICALIZE_PATH&& f, const char* name,
@@ -552,10 +552,10 @@ int main() {
 
   std::string pathCopies;
   pathCopies.resize(kNumRepetitions * max_size);
-  runBenchmarks(disambiguation, "CanonicalizePath", pathCopies);
-  runBenchmarks(disambiguation2, "CanonicalizePath2", pathCopies);
-  //runBenchmarks(disambiguation3, "CanonicalizePath3", pathCopies);
+  runBenchmarks(disambiguation2, "CanonicalizePath2 (SWAR)", pathCopies);
   runBenchmarks(CanonicalizePathOriginal, "CanonicalizePathOriginal", pathCopies);
+  runBenchmarks(disambiguation, "CanonicalizePath", pathCopies);
+  //runBenchmarks(disambiguation3, "CanonicalizePath3", pathCopies);
   //runBenchmarks(CheatyPath, "CheatyPath", pathCopies);
 
   // add additional implementations here for comparison
