@@ -114,8 +114,9 @@ void get_slashdot(const std::array<std::uint64_t, 8>& lhs,
                   std::uint64_t* forwardslashes, std::uint64_t* dots) {
   const std::uint64_t rhs = lsb * '.';
   const std::uint64_t is_lsb_set[] = {
-    lhs[0] & lsb, lhs[1] & lsb, lhs[2] & lsb, lhs[3] & lsb,
-    lhs[4] & lsb, lhs[5] & lsb, lhs[6] & lsb, lhs[7] & lsb,
+    (lhs[0] & lsb) << 7, (lhs[1] & lsb) << 7, (lhs[2] & lsb) << 7,
+    (lhs[3] & lsb) << 7, (lhs[4] & lsb) << 7, (lhs[5] & lsb) << 7,
+    (lhs[6] & lsb) << 7, (lhs[7] & lsb) << 7,
   };
   // compare with the lsb set to 0 to test for slashes and dots
   // at the same time
@@ -333,6 +334,177 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
   char* start = path;
   char* dst = start;
   char* dst_start = dst;
+  const char* src = start;
+  const char* end = start + *len;
+  const char* src_next;
+
+  // For absolute paths, skip the leading directory separator
+  // as this one should never be removed from the result.
+  if (IsPathSeparator(*src)) {
+#ifdef _WIN32
+    // Windows network path starts with //
+    if (src + 2 <= end && IsPathSeparator(src[1])) {
+      src += 2;
+      dst += 2;
+    } else {
+      ++src;
+      ++dst;
+    }
+#else
+    ++src;
+    ++dst;
+#endif
+    dst_start = dst;
+  } else {
+    // For relative paths, skip any leading ../ as these are quite common
+    // to reference source files in build plans, and doing this here makes
+    // the loop work below faster in general.
+    while (src + 3 <= end && src[0] == '.' && src[1] == '.' &&
+           IsPathSeparator(src[2])) {
+      src += 3;
+      dst += 3;
+    }
+  }
+
+  // Loop over all components of the paths _except_ the last one, in
+  // order to simplify the loop's code and make it faster.
+  int component_count = 0;
+  char* dst0 = dst;
+  for (; src < end; src = src_next) {
+#ifndef _WIN32
+    // Use memchr() for faster lookups thanks to optimized C library
+    // implementation. `hyperfine canon_perftest` shows a significant
+    // difference (e,g, 484ms vs 437ms).
+    const char* next_sep =
+        static_cast<const char*>(::memchr(src, '/', end - src));
+    if (!next_sep) {
+      // This is the last component, will be handled out of the loop.
+      break;
+    }
+#else
+    // Need to check for both '/' and '\\' so do not use memchr().
+    // Cannot use strpbrk() because end[0] can be \0 or something else!
+    const char* next_sep = src;
+    while (next_sep != end && !IsPathSeparator(*next_sep))
+      ++next_sep;
+    if (next_sep == end) {
+      // This is the last component, will be handled out of the loop.
+      break;
+    }
+#endif
+    // Position for next loop iteration.
+    src_next = next_sep + 1;
+    // Length of the component, excluding trailing directory.
+    size_t component_len = next_sep - src;
+
+    if (component_len <= 2) {
+      if (component_len == 0) {
+        continue;  // Ignore empty component, e.g. 'foo//bar' -> 'foo/bar'.
+      }
+      if (src[0] == '.') {
+        if (component_len == 1) {
+          continue;  // Ignore '.' component, e.g. './foo' -> 'foo'.
+        } else if (src[1] == '.') {
+          // Process the '..' component if found. Back up if possible.
+          if (component_count > 0) {
+            // Move back to start of previous component.
+            --component_count;
+            while (--dst > dst0 && !IsPathSeparator(dst[-1])) {
+              // nothing to do here, decrement happens before condition check.
+            }
+          } else {
+            dst[0] = '.';
+            dst[1] = '.';
+            dst[2] = src[2];
+            dst += 3;
+          }
+          continue;
+        }
+      }
+    }
+    ++component_count;
+
+    // Copy or skip component, including trailing directory separator.
+    if (dst != src) {
+      ::memmove(dst, src, src_next - src);
+    }
+    dst += src_next - src;
+  }
+
+  // Handling the last component that does not have a trailing separator.
+  // The logic here is _slightly_ different since there is no trailing
+  // directory separator.
+  size_t component_len = end - src;
+  do {
+    if (component_len == 0)
+      break;  // Ignore empty component (e.g. 'foo//' -> 'foo/')
+    if (src[0] == '.') {
+      if (component_len == 1)
+        break;  // Ignore trailing '.' (e.g. 'foo/.' -> 'foo/')
+      if (component_len == 2 && src[1] == '.') {
+        // Handle '..'. Back up if possible.
+        if (component_count > 0) {
+          while (--dst > dst0 && !IsPathSeparator(dst[-1])) {
+            // nothing to do here, decrement happens before condition check.
+          }
+        } else {
+          dst[0] = '.';
+          dst[1] = '.';
+          dst += 2;
+          // No separator to add here.
+        }
+        break;
+      }
+    }
+    // Skip or copy last component, no trailing separator.
+    if (dst != src) {
+      ::memmove(dst, src, component_len);
+    }
+    dst += component_len;
+  } while (0);
+
+  // Remove trailing path separator if any, but keep the initial
+  // path separator(s) if there was one (or two on Windows).
+  if (dst > dst_start && IsPathSeparator(dst[-1]))
+    dst--;
+
+  if (dst == start) {
+    // Handle special cases like "aa/.." -> "."
+    *dst++ = '.';
+  }
+
+  *len = dst - start;  // dst points after the trailing char here.
+#ifdef _WIN32
+  uint64_t bits = 0;
+  uint64_t bits_mask = 1;
+
+  for (char* c = start; c < start + *len; ++c) {
+    switch (*c) {
+      case '\\':
+        bits |= bits_mask;
+        *c = '/';
+        NINJA_FALLTHROUGH;
+      case '/':
+        bits_mask <<= 1;
+    }
+  }
+
+  *slash_bits = bits;
+#else
+  *slash_bits = 0;
+#endif
+}
+
+void CanonicalizePathTwiceMemChr(char* path, size_t* len, uint64_t* slash_bits) {
+  // WARNING: this function is performance-critical; please benchmark
+  // any changes you make to it.
+  if (*len == 0) {
+    return;
+  }
+
+  char* start = path;
+  char* dst = start;
+  char* dst_start = dst;
   const char* end = start + *len;
 
   // For absolute paths, skip the leading directory separator
@@ -535,6 +707,8 @@ void CanonicalizePath2(string* path, uint64_t* slash_bits) {
   }
 }
 
+#pragma intrinsic(_BitScanForward64,_BitScanReverse64,memset,memcpy)
+
 void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   const char* src = path;
   char* dst = path;
@@ -615,60 +789,89 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
 #endif
         forwardslash_bits;
 
-    // Look at empty paths
+    // Keep track of characters to remove
+    std::uint64_t to_remove = 0;
+
+    // Look at empty paths (bit set for each slash with a preceeding slash)
     const std::uint64_t empty_paths_to_remove =
         slash_bits & ((slash_bits << 1u) | previous_slashes);
+    to_remove |= empty_paths_to_remove;
 
-    // Look at current path /./
+    // Look at current path /./ (bit set on the last slash)
     const std::uint64_t current_path_indicator =
         ((slash_bits << 2u) | (previous_slashes << 1u)) &
         ((dot_bits << 1u) | previous_dots) & slash_bits;
     const std::uint64_t current_path_to_remove =
         current_path_indicator | (current_path_indicator >> 1u);
+    to_remove |= current_path_to_remove;
 
-    // Look at parent path /../
+
+    // Look at parent path /../ (bit set on the last slash)
     const std::uint64_t parent_path_indicator =
         ((slash_bits << 3u) | (previous_slashes << 2u)) &
         ((dot_bits << 2u) | (previous_dots << 1u)) &
         ((dot_bits << 1u) | previous_dots) &
       slash_bits;
-    std::uint64_t parent_path_to_remove = parent_path_indicator |
-                                          (parent_path_indicator >> 1u) |
-                                          (parent_path_indicator >> 2u);
 
     // For each parent path, find and mark the previous directory for removal
     std::uint64_t remaining_parent = parent_path_indicator;
+    std::uint64_t parent_dirs_to_remove = 0;
     while (remaining_parent) {
-      unsigned long bit_pos;
-      _BitScanForward64(&bit_pos, remaining_parent);
+      //        010101001010 slash_bits
+      // Given "a/b/./../d/e" we need to get a mask for
+      //        000011111000
+      //                ^ parent_path_indicator
+      //             ^ prev_slash1
+      //           ^ prev_slash2
+      // Given "a/b/c/../d/../e" we need to get a mask for
+      //        000011111000000
+      // so we get the first parent_path_indicator
+      //                ^
+      // and then we need to get the next slash after the place we need to remove
+      //           ^
+      const std::int8_t first_parent_path_indicator = [&] {
+        unsigned long bit_pos;
+        const unsigned char res = _BitScanForward64(&bit_pos, remaining_parent);
+        assert(res == 1);
+        return bit_pos;
+      }();
 
-      // Find all slashes before this parent path that aren't already marked for removal
-      const std::uint64_t mask_before = (static_cast<std::uint64_t>(1) << bit_pos) - 1;
-      const std::uint64_t available_slashes = (slash_bits | (previous_slashes << 63)) & 
-                                               mask_before & 
-                                               mutable_chars & 
-                                               ~parent_path_to_remove;
+      // Trying to find the previous slash to the "../" parent
+      // path, ignoring slashes that have already been removed
+      const std::uint64_t before_mask =
+          (static_cast<std::uint64_t>(1) << first_parent_path_indicator) - 1;
+      const std::uint64_t to_consider = before_mask & slash_bits & ~to_remove;
+      const std::int8_t prev_slash1 = [&] {
+        unsigned long bit_pos;
+        const unsigned char res = _BitScanReverse64(&bit_pos, to_consider);
+        assert(res == 1);
+        return bit_pos;
+      }();
 
-      if (available_slashes) {
-        unsigned long prev_slash_pos;
-        _BitScanReverse64(&prev_slash_pos, available_slashes);
+      const std::uint64_t before_mask2 =
+          (static_cast<std::uint64_t>(1) << prev_slash1) - 1;
+      /*
+    TODO: When _BitScanReverse64 returns non-1, we need an extra +1 on
+    first_parent_path_indicator when creating the dots_and_prev_directory_to_remove 
+      mask. Since I think we need to remove 2 slashes, and if we didn't find one
+      then we need to remove our slash, else we would be an absolute path
+      */
+      bool found;
+      const std::int8_t prev_slash2 = [&] {
+        unsigned long bit_pos;
+        // Here we may not find a slash if it's the start of the path
+        found = _BitScanReverse64(&bit_pos, to_consider & before_mask2) == 1;
+        return found ? bit_pos : 0;
+      }();
 
-        // Create a mask from prev_slash_pos (exclusive) to bit_pos (inclusive)
-        // This removes the previous directory component and the "/../"
-        const std::uint64_t removal_range = 
-            ((static_cast<std::uint64_t>(1) << (bit_pos + 1)) - 1) &
-            ~((static_cast<std::uint64_t>(1) << (prev_slash_pos + 1)) - 1);
-
-        parent_path_to_remove |= removal_range;
-      }
-
-      // Clear this bit and continue
-      remaining_parent &= remaining_parent - 1;
+      const std::uint64_t dots_and_prev_directory_to_remove =
+          (static_cast<std::uint64_t>(1) << (first_parent_path_indicator + !found)) - 
+          (static_cast<std::uint64_t>(1) << prev_slash2);
+      to_remove |= dots_and_prev_directory_to_remove;
+      remaining_parent &=
+          ~(static_cast<std::uint64_t>(1) << first_parent_path_indicator);
     }
 
-    const std::uint64_t to_remove = padding_to_remove | empty_paths_to_remove |
-                                    current_path_to_remove |
-                                    parent_path_to_remove;
     const std::uint64_t to_keep = ~to_remove;
 
     // Calculate slash_bits
@@ -678,7 +881,7 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
           _pext_u64(to_keep & backslash_bits, to_keep & slash_bits)
           << slash_count;
     }
-    slash_count += __popcnt64(slash_bits);
+    slash_count += __popcnt64(to_keep & slash_bits);
 #endif
 
     // Copy things
