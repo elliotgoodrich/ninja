@@ -841,33 +841,48 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
       const std::uint64_t before_mask =
           (static_cast<std::uint64_t>(1) << first_parent_path_indicator) - 1;
       const std::uint64_t to_consider = before_mask & slash_bits & ~to_remove;
-      const std::int8_t prev_slash1 = [&] {
-        unsigned long bit_pos;
-        const unsigned char res = _BitScanReverse64(&bit_pos, to_consider);
-        assert(res == 1);
-        return bit_pos;
-      }();
+      // Only if there are slashes to consider can we attempt to remove
+      // the previous directory.  Otherwise we keep the "../"
+      if (to_consider) {
+        const std::int8_t prev_slash1 = [&] {
+          unsigned long bit_pos;
+          const unsigned char res = _BitScanReverse64(&bit_pos, to_consider);
+          assert(res == 1);
+          return bit_pos;
+        }();
 
-      const std::uint64_t before_mask2 =
-          (static_cast<std::uint64_t>(1) << prev_slash1) - 1;
-      /*
-    TODO: When _BitScanReverse64 returns non-1, we need an extra +1 on
-    first_parent_path_indicator when creating the dots_and_prev_directory_to_remove 
-      mask. Since I think we need to remove 2 slashes, and if we didn't find one
-      then we need to remove our slash, else we would be an absolute path
+        const std::uint64_t before_mask2 =
+            (static_cast<std::uint64_t>(1) << prev_slash1) - 1;
+
+        const auto bits_between = [](std::int8_t start, std::int8_t end) {
+          // end is one past the end
+          assert(start <= end);
+          assert(end <= 64);
+          const std::uint64_t ones = ~static_cast<std::uint64_t>(0);
+          return (ones << start) & (ones >> (64 - end));
+        };
+        /*
+    TODO: When _BitScanReverse64 returns non-1, we need an extra +1
+         * on
+    first_parent_path_indicator when creating the
+         * dots_and_prev_directory_to_remove 
+      mask. Since I think we need
+         * to remove 2 slashes, and if we didn't find one
+      then we need to
+         * remove our slash, else we would be an absolute path
       */
-      bool found;
-      const std::int8_t prev_slash2 = [&] {
-        unsigned long bit_pos;
-        // Here we may not find a slash if it's the start of the path
-        found = _BitScanReverse64(&bit_pos, to_consider & before_mask2) == 1;
-        return found ? bit_pos : 0;
-      }();
+        bool found;
+        const std::int8_t prev_slash2 = [&] {
+          unsigned long bit_pos;
+          // Here we may not find a slash if it's the start of the path
+          found = _BitScanReverse64(&bit_pos, to_consider & before_mask2) == 1;
+          return found ? bit_pos : 0;
+        }();
 
-      const std::uint64_t dots_and_prev_directory_to_remove =
-          (static_cast<std::uint64_t>(1) << (first_parent_path_indicator + !found)) - 
-          (static_cast<std::uint64_t>(1) << prev_slash2);
-      to_remove |= dots_and_prev_directory_to_remove;
+        const std::uint64_t dots_and_prev_directory_to_remove =
+            bits_between(prev_slash2, first_parent_path_indicator + !found);
+        to_remove |= dots_and_prev_directory_to_remove;
+      }
       remaining_parent &=
           ~(static_cast<std::uint64_t>(1) << first_parent_path_indicator);
     }
