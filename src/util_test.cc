@@ -48,6 +48,10 @@ TEST(CanonicalizePath, PathSamples) {
   //CanonicalizePath(&path);
   //EXPECT_EQ("../bar.h", path);
 
+  path = "../..";
+  CanonicalizePath(&path);
+  EXPECT_EQ("../..", path);
+
   path = "a/foo/../bar.h";
   CanonicalizePath(&path);
   EXPECT_EQ("a/bar.h", path);

@@ -720,9 +720,10 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   std::uint64_t output_slashes = 0;
   std::uint64_t slash_count = 0;
 
+  // Keep a bitmask for characters that are mutable
   std::uint64_t mutable_chars = 0xff'ff'ff'ff'ff'ff'ff'ffull;
-  // TODO: Use this to preserve the initial slash (or double slash on windows)
-  // for absolute paths.
+
+  // Preserve the initial slash (or double slash on windows)
   if (remaining >= 1 && IsPathSeparator(src[0])) {
     if (remaining >= 2 && IsPathSeparator(src[1])) {
       mutable_chars = ~static_cast<std::uint64_t>(0b11);
@@ -790,7 +791,7 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
         forwardslash_bits;
 
     // Keep track of characters to remove
-    std::uint64_t to_remove = 0;
+    std::uint64_t to_remove = padding_to_remove;
 
     // Look at empty paths (bit set for each slash with a preceeding slash)
     const std::uint64_t empty_paths_to_remove =
@@ -805,7 +806,6 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
         current_path_indicator | (current_path_indicator >> 1u);
     to_remove |= current_path_to_remove;
 
-
     // Look at parent path /../ (bit set on the last slash)
     const std::uint64_t parent_path_indicator =
         ((slash_bits << 3u) | (previous_slashes << 2u)) &
@@ -817,18 +817,6 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     std::uint64_t remaining_parent = parent_path_indicator;
     std::uint64_t parent_dirs_to_remove = 0;
     while (remaining_parent) {
-      //        010101001010 slash_bits
-      // Given "a/b/./../d/e" we need to get a mask for
-      //        000011111000
-      //                ^ parent_path_indicator
-      //             ^ prev_slash1
-      //           ^ prev_slash2
-      // Given "a/b/c/../d/../e" we need to get a mask for
-      //        000011111000000
-      // so we get the first parent_path_indicator
-      //                ^
-      // and then we need to get the next slash after the place we need to remove
-      //           ^
       const std::int8_t first_parent_path_indicator = [&] {
         unsigned long bit_pos;
         const unsigned char res = _BitScanForward64(&bit_pos, remaining_parent);
@@ -840,10 +828,17 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
       // path, ignoring slashes that have already been removed
       const std::uint64_t before_mask =
           (static_cast<std::uint64_t>(1) << first_parent_path_indicator) - 1;
-      const std::uint64_t to_consider = before_mask & slash_bits & ~to_remove;
+      const std::uint64_t to_consider =
+          before_mask & slash_bits & ~to_remove & mutable_chars;
       // Only if there are slashes to consider can we attempt to remove
       // the previous directory.  Otherwise we keep the "../"
-      if (to_consider) {
+      if (!to_consider) {
+        const std::uint64_t immutable = (static_cast<std::uint64_t>(0b111)
+                                         << (first_parent_path_indicator - 2));
+        const std::uint64_t mask = immutable & ~to_remove;
+        mutable_chars &= ~mask;
+        dst_start += __popcnt64(mask);
+      } else {
         const std::int8_t prev_slash1 = [&] {
           unsigned long bit_pos;
           const unsigned char res = _BitScanReverse64(&bit_pos, to_consider);
