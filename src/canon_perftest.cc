@@ -27,7 +27,22 @@
 #include "util.h"
 
 const std::string kPaths[] = {
+  // Small Relative
+  "third_party/WebKit/smalll/"
+  "platform/leveldb/LevelDBWriteBatch.cpp",
+  // Small Relative
+  "third_party/WebKit/small/"
+  "platform/leveldb/LevelDBWriteBatch.cpp",
   // Relative
+  "third_party/WebKit/Source/WebCore/"
+  "platform/leveldb/LevelDBWriteBatch.cpp",
+  // Relative long
+  "third_party/WebKit/Source/WebCore/"
+  "third_party/WebKit/Source/WebCore/"
+  "third_party/WebKit/Source/WebCore/"
+  "third_party/WebKit/Source/WebCore/"
+  "third_party/WebKit/Source/WebCore/"
+  "third_party/WebKit/Source/WebCore/"
   "third_party/WebKit/Source/WebCore/"
   "platform/leveldb/LevelDBWriteBatch.cpp",
   // Absolute
@@ -46,7 +61,7 @@ const std::string kPaths[] = {
   "third_party//WebKit///Source/WebCore/"
   "platform/leveldb/LevelDBWriteBatch.cpp",
 
-#if 1
+#if 0
   // Handle the same paths again but with backslashes
   // Relative
   "third_party\\WebKit\\Source\\WebCore\\"

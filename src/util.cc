@@ -763,6 +763,11 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     }
   }
 
+  // Track the start of a contiguous region we haven't copied yet.
+  // This lets us batch fast-path chunks and only call memmove when
+  // we actually encounter characters to remove.
+  const char* pending_copy_from = src;
+
   while (remaining) {
     // For full 64-byte chunks, read directly from src without copying
     // into an intermediate buffer. On x86-64 unaligned uint64_t loads
@@ -845,12 +850,10 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
       slash_bits;
 
     // Fast path: nothing to remove in this chunk (common case).
-    // No empty paths, no ".", no ".." — just copy directly.
+    // No empty paths, no ".", no ".." — just advance src and let the
+    // pending copy region grow.  The actual memmove is deferred until
+    // we hit a gap (or the end of the path).
     if ((to_remove | parent_path_indicator) == padding_to_remove) {
-      if (dst != src) {
-        ::memmove(dst, src, chunk_size);
-      }
-      dst += chunk_size;
       src += chunk_size;
       previous_slashes = slash_bits >> 63;
       previous_dots = dot_bits >> 63;
@@ -928,36 +931,63 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     slash_count += popcnt64(to_keep & slash_bits);
 #endif
 
-    // Copy kept characters directly from src to dst, skipping removed ones.
-    // This avoids needing the intermediate buffer for full chunks entirely.
+    // Copy kept characters from src to dst, skipping removed ones.
+    // We defer copying: `pending_copy_from` tracks the start of the
+    // accumulated region that hasn't been flushed yet (which may
+    // extend back into previous fast-path chunks).  We only call
+    // memmove when we encounter a gap.
     std::uint64_t to_skip = mutable_chars & to_remove;
 
-    unsigned long start = 0;
-    unsigned long end;
-    while (bit_scan_forward64(&end, to_skip)) {
-      const std::size_t size = end - start;
-      ::memmove(dst, src + start, size);
-      dst += size;
-      // Advance past the contiguous run of bits to skip
-      to_skip += static_cast<std::uint64_t>(1) << end;
-      if (bit_scan_forward64(&start, to_skip)) {
-        to_skip ^= static_cast<std::uint64_t>(1) << start;
-      } else {
-        start = 64;
-        goto no_need_to_copy;
+    unsigned long skip_start;
+    if (bit_scan_forward64(&skip_start, to_skip)) {
+      // Flush everything from pending_copy_from up to this first gap.
+      const std::size_t pending_size =
+          (src + skip_start) - pending_copy_from;
+      if (pending_size > 0) {
+        ::memmove(dst, pending_copy_from, pending_size);
+        dst += pending_size;
+      }
+
+      // Now walk through alternating skip/keep ranges within this chunk.
+      for (;;) {
+        // Advance past the contiguous run of bits to skip.
+        to_skip += static_cast<std::uint64_t>(1) << skip_start;
+        unsigned long keep_start;
+        if (!bit_scan_forward64(&keep_start, to_skip)) {
+          // Everything from skip_start to end of chunk is removed.
+          pending_copy_from = src + 64;
+          goto done_copying;
+        }
+        to_skip ^= static_cast<std::uint64_t>(1) << keep_start;
+
+        // Find the next gap (or end of chunk).
+        unsigned long next_skip;
+        if (!bit_scan_forward64(&next_skip, to_skip)) {
+          // Keep region extends to end of chunk — don't copy yet,
+          // let it accumulate with the next chunk's fast path.
+          pending_copy_from = src + keep_start;
+          goto done_copying;
+        }
+
+        // Copy the keep region between two gaps.
+        const std::size_t size = next_skip - keep_start;
+        ::memmove(dst, src + keep_start, size);
+        dst += size;
+        skip_start = next_skip;
       }
     }
-    // Copy the remaining
-    {
-      const std::size_t size = 64 - start;
-      ::memmove(dst, src + start, size);
-      dst += size;
-    }
-    no_need_to_copy:
+    // No bits to skip in this chunk at all (only padding was removed).
+    // pending_copy_from stays where it was — the region keeps growing.
+    done_copying:
     src += 64;
     previous_slashes = slash_bits >> 63;
     previous_dots = dot_bits >> 63;
     mutable_chars = ~static_cast<std::uint64_t>(0);
+  }
+
+  // Flush any remaining pending copy region.
+  if (src != dst) {
+    ::memmove(dst, pending_copy_from, src - pending_copy_from);
   }
   
   // TODO: make SWAR?
