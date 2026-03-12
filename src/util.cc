@@ -132,7 +132,7 @@ std::array<std::uint64_t, 8> msb_equal(const std::array<std::uint64_t, 8>& lhs,
   return result;
 }
 
-__attribute__((target("bmi2")))
+//__attribute__((target("bmi2")))
 std::uint64_t compress(const std::uint64_t *v) {
 #if 1
   const std::uint64_t bits =
@@ -736,7 +736,7 @@ void CanonicalizePath2(string* path, uint64_t* slash_bits) {
   }
 }
 
-__attribute__((target("bmi2")))
+//__attribute__((target("bmi2")))
 void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   const char* src = path;
   char* dst = path;
@@ -774,13 +774,12 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     // are fast so reinterpret_cast is safe and avoids a 64-byte memcpy.
     // For partial chunks we still need a padded buffer.
     std::array<std::uint64_t, 8> partial_buffer;
-    const std::uint64_t* chunk_data;
     std::uint64_t padding_to_remove;
     std::size_t chunk_size;
     if (remaining > 64) {
       chunk_size = 64;
       remaining -= 64;
-      chunk_data = reinterpret_cast<const std::uint64_t*>(src);
+      std::memcpy(&partial_buffer, src, partial_buffer.size());
       padding_to_remove = 0;
     }
     else {
@@ -793,13 +792,12 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
       };
       padding_to_remove = ~((static_cast<std::uint64_t>(1) << remaining) - 1);
       std::memcpy(&partial_buffer, src, remaining);
-      chunk_data = partial_buffer.data();
       remaining = 0;
     }
 
     std::uint64_t forwardslash_bits;
     std::uint64_t dot_bits;
-    get_slashdot(chunk_data, &forwardslash_bits, &dot_bits);
+    get_slashdot(partial_buffer.data(), &forwardslash_bits, &dot_bits);
 #define NEED_BACKSLASH WIN32_
 #if NEED_BACKSLASH
     std::array<std::uint64_t, 8> backslashes = msb_equal(buffer, '\\');
@@ -866,7 +864,8 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     while (remaining_parent) {
       const std::int8_t first_parent_path_indicator = [&] {
         unsigned long bit_pos;
-        [[maybe_unused]] const bool okay = bit_scan_forward64(&bit_pos, remaining_parent);
+        [[maybe_unused]] const bool okay =
+            bit_scan_forward64(&bit_pos, remaining_parent);
         assert(okay);
         return bit_pos;
       }();
