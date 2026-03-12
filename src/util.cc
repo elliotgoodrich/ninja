@@ -160,7 +160,7 @@ std::uint64_t compress(const std::uint64_t *v) {
 #endif
 }
 
-void get_slashdot(const std::array<std::uint64_t, 8>& lhs,
+void get_slashdot(const std::uint64_t* lhs,
                   std::uint64_t* forwardslashes, std::uint64_t* dots) {
   const std::uint64_t rhs = lsb * '.';
   const std::uint64_t is_lsb_set[] = {
@@ -192,6 +192,11 @@ void get_slashdot(const std::array<std::uint64_t, 8>& lhs,
   const std::uint64_t low_bit_set = compress(is_lsb_set);
   *forwardslashes = slash_or_dot & low_bit_set;
   *dots = slash_or_dot & ~low_bit_set;
+}
+
+void get_slashdot(const std::array<std::uint64_t, 8>& lhs,
+                  std::uint64_t* forwardslashes, std::uint64_t* dots) {
+  get_slashdot(lhs.data(), forwardslashes, dots);
 }
 
 std::uint64_t convert_backslashes_msb(const std::uint64_t text, const std::uint64_t backslashes_msb) {
@@ -743,8 +748,8 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   std::uint64_t output_slashes = 0;
   std::uint64_t slash_count = 0;
 
-  // Keep a bitmask for characters that are mutable
-  std::uint64_t mutable_chars = 0xff'ff'ff'ff'ff'ff'ff'ffull;
+  // Keep a bitmask for characters that are mutable (not removable by "..")
+  std::uint64_t mutable_chars = ~static_cast<std::uint64_t>(0);
 
   // Preserve the initial slash (or double slash on windows)
   if (remaining >= 1 && IsPathSeparator(src[0])) {
@@ -759,36 +764,39 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   }
 
   while (remaining) {
-    std::array<std::uint64_t, 8> buffer;
+    // For full 64-byte chunks, read directly from src without copying
+    // into an intermediate buffer. On x86-64 unaligned uint64_t loads
+    // are fast so reinterpret_cast is safe and avoids a 64-byte memcpy.
+    // For partial chunks we still need a padded buffer.
+    std::array<std::uint64_t, 8> partial_buffer;
+    const std::uint64_t* chunk_data;
     std::uint64_t padding_to_remove;
+    std::size_t chunk_size;
     if (remaining > 64) {
+      chunk_size = 64;
       remaining -= 64;
-      std::memcpy(&buffer, src, 64);
+      chunk_data = reinterpret_cast<const std::uint64_t*>(src);
       padding_to_remove = 0;
-      // TODO, we have a problem with trailing slashes not being
-      // added here. Maybe we need a mask that's
-      // uint64_t fake_slash = (remaining == 64) ? 1 : 0;
-      // and then use the fake_slash when offsetting 
-      // Actually, if we have a multiple of 64 then we probably need to do another
-      // iteration with only fake slashes.
     }
     else {
-      buffer = {
+      chunk_size = remaining;
+      partial_buffer = {
         0x2f'2f'2f'2f'2f'2f'2f'2f, 0x2f'2f'2f'2f'2f'2f'2f'2f,
         0x2f'2f'2f'2f'2f'2f'2f'2f, 0x2f'2f'2f'2f'2f'2f'2f'2f,
         0x2f'2f'2f'2f'2f'2f'2f'2f, 0x2f'2f'2f'2f'2f'2f'2f'2f,
         0x2f'2f'2f'2f'2f'2f'2f'2f, 0x2f'2f'2f'2f'2f'2f'2f'2f,
       };
       padding_to_remove = ~((static_cast<std::uint64_t>(1) << remaining) - 1);
-      std::memcpy(&buffer, src, remaining);
+      std::memcpy(&partial_buffer, src, remaining);
+      chunk_data = partial_buffer.data();
       remaining = 0;
     }
 
     std::uint64_t forwardslash_bits;
     std::uint64_t dot_bits;
-    get_slashdot(buffer, &forwardslash_bits, &dot_bits);
+    get_slashdot(chunk_data, &forwardslash_bits, &dot_bits);
 #define NEED_BACKSLASH WIN32_
-#if NEED_BACKSLASH 
+#if NEED_BACKSLASH
     std::array<std::uint64_t, 8> backslashes = msb_equal(buffer, '\\');
     std::uint64_t backslash_bits = 0;
     // Assume we don't have backslashes and try to skip some comparatively expensive work
@@ -808,7 +816,7 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
 #endif
 
     const std::uint64_t slash_bits =
-#if NEED_BACKSLASH 
+#if NEED_BACKSLASH
         backslash_bits |
 #endif
         forwardslash_bits;
@@ -836,9 +844,22 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
         ((dot_bits << 1u) | previous_dots) &
       slash_bits;
 
+    // Fast path: nothing to remove in this chunk (common case).
+    // No empty paths, no ".", no ".." — just copy directly.
+    if ((to_remove | parent_path_indicator) == padding_to_remove) {
+      if (dst != src) {
+        ::memmove(dst, src, chunk_size);
+      }
+      dst += chunk_size;
+      src += chunk_size;
+      previous_slashes = slash_bits >> 63;
+      previous_dots = dot_bits >> 63;
+      mutable_chars = ~static_cast<std::uint64_t>(0);
+      continue;
+    }
+
     // For each parent path, find and mark the previous directory for removal
     std::uint64_t remaining_parent = parent_path_indicator;
-    std::uint64_t parent_dirs_to_remove = 0;
     while (remaining_parent) {
       const std::int8_t first_parent_path_indicator = [&] {
         unsigned long bit_pos;
@@ -898,7 +919,7 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     const std::uint64_t to_keep = ~to_remove;
 
     // Calculate slash_bits
-#if NEED_BACKSLASH 
+#if NEED_BACKSLASH
     if (slash_count < 64) {
       output_slashes |=
           _pext_u64(to_keep & backslash_bits, to_keep & slash_bits)
@@ -907,18 +928,17 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     slash_count += popcnt64(to_keep & slash_bits);
 #endif
 
-    // Copy things
+    // Copy kept characters directly from src to dst, skipping removed ones.
+    // This avoids needing the intermediate buffer for full chunks entirely.
     std::uint64_t to_skip = mutable_chars & to_remove;
 
     unsigned long start = 0;
     unsigned long end;
-    // If we can find a set bit
-    // 11111111110000
     while (bit_scan_forward64(&end, to_skip)) {
       const std::size_t size = end - start;
-      std::memcpy(dst, reinterpret_cast<const char*>(&buffer) + start, size);
+      ::memmove(dst, src + start, size);
       dst += size;
-      // Mark all the chars we just copied as skippable
+      // Advance past the contiguous run of bits to skip
       to_skip += static_cast<std::uint64_t>(1) << end;
       if (bit_scan_forward64(&start, to_skip)) {
         to_skip ^= static_cast<std::uint64_t>(1) << start;
@@ -930,13 +950,13 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     // Copy the remaining
     {
       const std::size_t size = 64 - start;
-      std::memcpy(dst, reinterpret_cast<const char*>(&buffer) + start, size);
+      ::memmove(dst, src + start, size);
       dst += size;
     }
     no_need_to_copy:
     src += 64;
-    previous_slashes = slash_bits;
-    previous_dots = dot_bits;
+    previous_slashes = slash_bits >> 63;
+    previous_dots = dot_bits >> 63;
     mutable_chars = ~static_cast<std::uint64_t>(0);
   }
   
