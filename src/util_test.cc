@@ -31,22 +31,9 @@ TEST(CanonicalizePath, PathSamples) {
   string path;
   uint64_t slash_bits;
 
-  #if 0
-  path = "a/b/..\\c.h";
-  CanonicalizePath(&path, &slash_bits);
-  EXPECT_EQ("a/c.h", path); // "a/c.h"
-  EXPECT_EQ(0, slash_bits);
-
-  path = "a\\b/../c.h";
-  CanonicalizePath(&path, &slash_bits);
-  EXPECT_EQ("a/c.h", path);
-  EXPECT_EQ(1, slash_bits); // a\c.h
-  #endif
-
-  // TO TEST
-  //path = "./x/../foo/../../bar.h";
-  //CanonicalizePath(&path);
-  //EXPECT_EQ("../bar.h", path);
+  path = "../";
+  CanonicalizePath(&path);
+  EXPECT_EQ("..", path);
 
   path = "../..";
   CanonicalizePath(&path);

@@ -837,7 +837,6 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
                                          << (first_parent_path_indicator - 2));
         const std::uint64_t mask = immutable & ~to_remove;
         mutable_chars &= ~mask;
-        dst_start += __popcnt64(mask);
       } else {
         const std::int8_t prev_slash1 = [&] {
           unsigned long bit_pos;
@@ -856,16 +855,7 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
           const std::uint64_t ones = ~static_cast<std::uint64_t>(0);
           return (ones << start) & (ones >> (64 - end));
         };
-        /*
-    TODO: When _BitScanReverse64 returns non-1, we need an extra +1
-         * on
-    first_parent_path_indicator when creating the
-         * dots_and_prev_directory_to_remove 
-      mask. Since I think we need
-         * to remove 2 slashes, and if we didn't find one
-      then we need to
-         * remove our slash, else we would be an absolute path
-      */
+
         bool found;
         const std::int8_t prev_slash2 = [&] {
           unsigned long bit_pos;
