@@ -14,7 +14,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <intrin.h>
 
 #include <array>
 #include <cassert>
@@ -82,115 +81,6 @@ static bool IsPathSeparator(char c) {
 #endif
 }
 
-#if 1
-using SWAR = std::uint64_t;
-#else
-struct SWAR {
-  std::uint64_t data;
-};
-
-SWAR operator|(SWAR l, SWAR r) {
-  return SWAR{ l.data | r.data };
-}
-
-SWAR operator&(SWAR l, SWAR r) {
-  return SWAR{ l.data & r.data };
-}
-
-SWAR operator^(SWAR l, SWAR r) {
-  return SWAR{ l.data ^ r.data };
-}
-
-SWAR operator~(SWAR l) {
-  return SWAR{ ~l.data };
-}
-
-SWAR operator==(SWAR lhs, SWAR rhs) {
-  const SWAR msb{ 0x80'80'80'80'80'80'80'80ull };
-  const SWAR lsb{ 0x01'01'01'01'01'01'01'01ull };
-  const SWAR zero_if_equal = lhs ^ rhs;
-  const SWAR A = zero_if_equal | msb;
-  const SWAR B{ A.data - lsb.data };
-  const SWAR C = zero_if_equal | B;
-  const SWAR D = ~C;
-  const SWAR FINAL = D & msb;
-  return FINAL;
-}
-#endif
-
-template <typename T>
-__forceinline std::uint64_t combine(const SWAR* x, T&& thing)
-{
-  return (thing(x[0]) << 0ull) | (thing(x[1]) << 8ull) | (thing(x[2]) << 16ull) |
-         (thing(x[3]) << 24ull) | (thing(x[4]) << 32ull) |
-         (thing(x[5]) << 40ull) | (thing(x[6]) << 48ull) |
-         (thing(x[7]) << 56ull);
-}
-
-__forceinline std::uint8_t get_equal_bytes(SWAR lhs,
-                                           SWAR rhs) {
-  const SWAR equal = lhs == rhs;
-#if 0
-  return (equal.data * 0x02'04'08'10'20'40'81ull) >> 56;
-#else
-  return (equal * 0x02'04'08'10'20'40'81ull) >> 56;
-#endif
-}
-
-__forceinline std::uint64_t backslash_mask_u64(SWAR v) {
-  constexpr SWAR BS{ 0x5C5C5C5C5C5C5C5CULL };
-  return get_equal_bytes(v, BS);
-}
-
-__forceinline std::uint64_t slash_mask_u64(SWAR v) {
-  constexpr SWAR SLASH{ 0x2F2F2F2F2F2F2F2FULL };
-#if 1
-  return get_equal_bytes(v, SLASH);
-#else
-  // 1) slash bytes -> 0
-  v ^= SLASH;
-
-  // 2) Per-byte: reduce "is nonzero" into the low bit of each byte.
-  // After these steps, bit0 of each byte is 1 iff that byte was nonzero.
-  v |= (v >> 4) & 0x0F0F0F0F0F0F0F0FULL;
-  v |= (v >> 2) & 0x0303030303030303ULL;
-  v |= (v >> 1) & 0x0101010101010101ULL;
-  v &= 0x0101010101010101ULL;
-
-  // Now: v has 1 in each byte if (byte != 0). Flip to get 1 for (byte ==
-  // 0)
-  // => slash.
-  v ^= 0x0101010101010101ULL;
-
-  // 3) Gather the low bit from each byte into bits [0..7]
-  return (std::uint8_t)((v * 0x0102040810204080ULL) >> 56);
-#endif
-}
-
-__forceinline std::uint64_t dot_mask_u64(SWAR v) {
-  constexpr SWAR DOT{ 0x2e2e2e2e2e2e2e2eULL };
-#if 1
-  return get_equal_bytes(v, DOT);
-#else
-  v ^= DOT;
-
-  // 2) Per-byte: reduce "is nonzero" into the low bit of each byte.
-  // After these steps, bit0 of each byte is 1 iff that byte was nonzero.
-  v |= (v >> 4) & 0x0F0F0F0F0F0F0F0FULL;
-  v |= (v >> 2) & 0x0303030303030303ULL;
-  v |= (v >> 1) & 0x0101010101010101ULL;
-  v &= 0x0101010101010101ULL;
-
-  // Now: v has 1 in each byte if (byte != 0). Flip to get 1 for (byte ==
-  // 0)
-  // => slash.
-  v ^= 0x0101010101010101ULL;
-
-  // 3) Gather the low bit from each byte into bits [0..7]
-  return (std::uint8_t)((v * 0x0102040810204080ULL) >> 56);
-#endif
-}
-
 void disambiguation2(char* path, std::size_t* len, std::uint64_t* slash_bits) {
   // Disambiguate between overloads of CanonicalizePath
   CanonicalizePath2(path, len, slash_bits);
@@ -240,80 +130,6 @@ Assume that every path ends with a slash to make things easier
   "00011111111110000" to remove (WANT) = C & ~B
 
   */
-
-void CheatyPath(char* path, std::size_t* len, std::uint64_t* slash_bit) {
-  if (*len == 0) {
-    return;
-  }
- 
-  const std::size_t chunks = *len / 64;
-  //assert(chunks * 8 == *len); // FIX later
-  char* dst = path;
-  const char* src = path;
-  for (std::size_t i = 0; i < chunks; ++i) {
-#if 1
-    SWAR temp[8];
-    std::memcpy(&temp, src, sizeof(temp));
-#else
-    const SWAR* temp = reinterpret_cast<const SWAR*>(src);
-#endif
-    // "//a/b/c/" -> 11010101
-    const std::uint64_t slash_bits =
-#ifdef _WIN32
-        combine(temp, backslash_mask_u64) &
-#endif
-        combine(temp, slash_mask_u64);
-    const std::uint64_t dot_bits = combine(temp, dot_mask_u64);
-    
-    // Look at empty paths
-    const std::uint64_t empty_paths_to_remove = slash_bits & (slash_bits >> 1u);
-
-    // Look at current path /./
-    const std::uint64_t current_path_indicator =
-        (slash_bits << 2u) & (dot_bits << 1u) & slash_bits;
-    const std::uint64_t current_path_to_remove =
-        current_path_indicator | (current_path_indicator >> 1u);
-
-    // Look at parent path
-    
-    const std::uint64_t parent_path_indicator =
-        (slash_bits << 3u) & (dot_bits << 2u) & (dot_bits << 1u) & slash_bits;
-    // Loop while parent_path_indicator is not 0;
-    const std::uint64_t kept_slashes = slash_bits & ~empty_paths_to_remove &
-                                       ~current_path_to_remove &
-                                       ~(parent_path_indicator << 3u);
-    // Looks at the lowest slash and sets everything to the left of it
-    const std::uint64_t slashes_to_the_left = [&](){
-      const std::uint64_t low = kept_slashes & -kept_slashes;
-      return kept_slashes | ~(low - 1);
-    }();
-    const std::uint64_t dirs_to_remove =
-        ~slashes_to_the_left & ~(parent_path_indicator - 1);
-
-    std::uint64_t to_remove =
-        empty_paths_to_remove | current_path_to_remove;
-    // tODO: Add dirs_to_remove
-    std::int64_t start = 0;
-    while (to_remove) {
-      unsigned long last_index_to_keep;
-      _BitScanForward64(&last_index_to_keep, to_remove);
-      const std::int64_t end = last_index_to_keep + 1;
-      std::memcpy(dst, reinterpret_cast<const char*>(&temp) + start,
-                  end - start);
-      dst += end - start;
-      to_remove &= ~(1ull << last_index_to_keep);
-      start = end + 1;
-    }
-    if (dst != src) {
-      std::memcpy(dst, reinterpret_cast<const char*>(&temp) + start,
-                  sizeof(temp) - start);
-    }
-    dst += sizeof(temp) - start;
-    src += sizeof(temp);
-  }
- 
-  *len = dst - path;
-}
 
 void CanonicalizePathOriginal(char* path, size_t* len, uint64_t* slash_bits) {
   // WARNING: this function is performance-critical; please benchmark
@@ -531,20 +347,14 @@ void runBenchmarks(CANONICALIZE_PATH&& f, const char* name,
     sum_of_avg += avg;
   }
 
+  const std::size_t size = sizeof(kPaths) / sizeof(kPaths[0]);
   printf("AVERAGE:\n  min %dms  max %dms  avg %.1fms\n",
-         static_cast<int>(sum_of_min / std::size(kPaths)),
-         static_cast<int>(sum_of_max / std::size(kPaths)),
-         sum_of_avg / std::size(kPaths));
+         static_cast<int>(sum_of_min / size),
+         static_cast<int>(sum_of_max / size),
+         sum_of_avg / size);
 }
 
 int main() {
-  //std::string test =
-  //    "th/./_party//WebKit///Source/WebCore/platform/leveldb/ssfdhs.cpp";
-  std::string test =
-      "0/00000000000000000000000000000000000000000000000000000000000000";
-  auto x = test.size();
-  CheatyPath(&test[0], &x, nullptr);
-  test.resize(x);
   std::size_t max_size = 0;
   for (const std::string& path : kPaths) {
     max_size = std::max(max_size, path.size());
@@ -553,8 +363,7 @@ int main() {
   std::string pathCopies;
   pathCopies.resize(kNumRepetitions * max_size);
   runBenchmarks(disambiguation2, "CanonicalizePath2 (SWAR)", pathCopies);
-  runBenchmarks(CanonicalizePathOriginal, "CanonicalizePathOriginal", pathCopies);
-  runBenchmarks(disambiguation, "CanonicalizePath", pathCopies);
+  runBenchmarks(disambiguation, "CanonicalizePath (original)", pathCopies);
   //runBenchmarks(disambiguation3, "CanonicalizePath3", pathCopies);
   //runBenchmarks(CheatyPath, "CheatyPath", pathCopies);
 
