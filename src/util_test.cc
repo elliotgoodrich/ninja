@@ -31,6 +31,10 @@ TEST(CanonicalizePath, PathSamples) {
   string path;
   uint64_t slash_bits;
 
+  path = "foo/bar/..";
+  CanonicalizePath(&path);
+  EXPECT_EQ("foo", path);
+
   path = "foo.h";
   CanonicalizePath(&path);
   EXPECT_EQ("foo.h", path);

@@ -113,7 +113,7 @@ std::uint64_t equal(std::uint64_t lhs, std::uint8_t c) {
 }
 
 // Set MSB for each char to 1 if it equals 'c'
-std::array<std::uint64_t, 8> msb_equal(const std::array<std::uint64_t, 8>& lhs,
+std::array<std::uint64_t, 8> msb_equal(const std::uint64_t* lhs,
                                    std::uint8_t c) {
   const std::uint64_t rhs = 0x0101010101010101ull * c;
   const std::uint64_t zero_if_equal[] = {
@@ -798,9 +798,9 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     std::uint64_t forwardslash_bits;
     std::uint64_t dot_bits;
     get_slashdot(partial_buffer.data(), &forwardslash_bits, &dot_bits);
-#define NEED_BACKSLASH WIN32_
+#define NEED_BACKSLASH 1
 #if NEED_BACKSLASH
-    std::array<std::uint64_t, 8> backslashes = msb_equal(buffer, '\\');
+    std::array<std::uint64_t, 8> backslashes = msb_equal(partial_buffer.data(), '\\');
     std::uint64_t backslash_bits = 0;
     // Assume we don't have backslashes and try to skip some comparatively expensive work
     if (msb & (backslashes[0] | backslashes[1] | backslashes[2] | backslashes[3] |
@@ -814,7 +814,8 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
       backslashes[6] &= msb;
       backslashes[7] &= msb;
       backslash_bits = compress(backslashes.data());
-      convert_backslashes(buffer.data(), backslashes);
+      convert_backslashes(partial_buffer.data(), backslashes);
+      std::memcpy(const_cast<char*>(src), partial_buffer.data(), chunk_size);
     }
 #endif
 
@@ -851,6 +852,7 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     // No empty paths, no ".", no ".." — just advance src and let the
     // pending copy region grow.  The actual memmove is deferred until
     // we hit a gap (or the end of the path).
+    /*
     if ((to_remove | parent_path_indicator) == padding_to_remove) {
       src += chunk_size;
       previous_slashes = slash_bits >> 63;
@@ -858,6 +860,7 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
       mutable_chars = ~static_cast<std::uint64_t>(0);
       continue;
     }
+    */
 
     // For each parent path, find and mark the previous directory for removal
     std::uint64_t remaining_parent = parent_path_indicator;
@@ -985,9 +988,10 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   }
 
   // Flush any remaining pending copy region.
-  if (src != dst) {
+  if (pending_copy_from != dst) {
     ::memmove(dst, pending_copy_from, src - pending_copy_from);
   }
+  dst += src - pending_copy_from;
   
   // TODO: make SWAR?
 
