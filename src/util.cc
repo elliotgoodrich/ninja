@@ -1004,6 +1004,111 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   *slash_bit = output_slashes;
 }
 
+void CanonicalizePath3(string* path, uint64_t* slash_bits) {
+  std::size_t len = path->size();
+  if (len > 0) {
+    char* str = &(*path)[0];
+    CanonicalizePath3(str, &len, slash_bits);
+    path->erase(path->begin() + len, path->end());
+  }
+}
+
+//__attribute__((target("bmi2")))
+void CanonicalizePath3(char* path, std::size_t* len, std::uint64_t* slash_bit) {
+  const char* src = path;
+  char* dst = path;
+  const char* dst_start = dst;
+  std::size_t remaining = *len;
+  std::uint64_t previous_slashes = 1;
+  std::uint64_t previous_dots = 0;
+
+  std::uint64_t output_slashes = 0;
+  std::uint64_t slash_count = 0;
+
+  // Keep a bitmask for characters that are mutable (not removable by "..")
+  std::uint64_t mutable_chars = ~static_cast<std::uint64_t>(0);
+
+  // Preserve the initial slash (or double slash on windows)
+  if (remaining >= 1 && IsPathSeparator(src[0])) {
+    if (remaining >= 2 && IsPathSeparator(src[1])) {
+      mutable_chars = ~static_cast<std::uint64_t>(0b11);
+      dst_start += 2;
+    }
+    else {
+      mutable_chars = ~static_cast<std::uint64_t>(0b1);
+      dst_start += 1;
+    }
+  }
+
+  // Track the start of a contiguous region we haven't copied yet.
+  // This lets us batch fast-path chunks and only call memmove when
+  // we actually encounter characters to remove.
+  const char* pending_copy_from = src;
+
+  const std::size_t words_needed = (*len % 8);
+  const std::size_t byte_overflow = 0;
+
+  const std::uint64_t all_dots = lsb * '.';
+  const std::uint64_t mask = ~lsb;
+  const auto get_slashdot_indicator = [=](const std::uint64_t word) {
+    const std::uint64_t is_lsb_set = (word & lsb) << 7;
+    const std::uint64_t zero_if_equal = (word & mask) ^ all_dots;
+    const std::uint64_t corrected = (zero_if_equal - lsb) & ~zero_if_equal;
+    const std::uint64_t bits =
+        _pext_u64(corrected, 0x80'80'80'80'80'80'80'80ull);
+    return bits;
+  };
+
+  const char* end = src + *len;
+  std::uint64_t buffer[8];
+  std::uint64_t slashdot_indicator = 0;
+  bool is_zero = false;
+  switch (words_needed) {
+    while (src < end) {
+      slashdot_indicator = 0;
+    case 7:
+      slashdot_indicator |= get_slashdot_indicator(buffer[0]);
+      src += 8;
+      std::memcpy(&buffer[1], src, sizeof(std::uint64_t));
+    case 6:
+      slashdot_indicator |= get_slashdot_indicator(buffer[1]) << 8;
+      src += 8;
+      std::memcpy(&buffer[2], src, sizeof(std::uint64_t));
+    case 5:
+      slashdot_indicator |= get_slashdot_indicator(buffer[2]) << 16;
+      src += 8;
+      std::memcpy(&buffer[3], src, sizeof(std::uint64_t));
+    case 4:
+      slashdot_indicator |= get_slashdot_indicator(buffer[3]) << 24;
+      src += 8;
+      std::memcpy(&buffer[4], src, sizeof(std::uint64_t));
+    case 3:
+      slashdot_indicator |= get_slashdot_indicator(buffer[4]) << 32;
+      src += 8;
+      std::memcpy(&buffer[5], src, sizeof(std::uint64_t));
+    case 2:
+      slashdot_indicator |= get_slashdot_indicator(buffer[5]) << 40;
+      src += 8;
+      std::memcpy(&buffer[6], src, sizeof(std::uint64_t));
+    case 1:
+      slashdot_indicator |= get_slashdot_indicator(buffer[6]) << 48;
+      src += 8;
+      std::memcpy(&buffer[7], src, sizeof(std::uint64_t));
+    case 0:
+      slashdot_indicator |= get_slashdot_indicator(buffer[7]) << 56;
+      src += 8;
+
+      if (slashdot_indicator & (slashdot_indicator << 1)) {
+        is_zero = true;
+        continue;
+      }
+    }
+  }
+
+  *len = is_zero ? 0 : *len;
+  *slash_bit = 0;
+}
+
 static inline bool IsKnownShellSafeCharacter(char ch) {
   if ('A' <= ch && ch <= 'Z') return true;
   if ('a' <= ch && ch <= 'z') return true;
