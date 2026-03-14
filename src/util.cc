@@ -148,14 +148,14 @@ std::uint64_t compress(const std::uint64_t *v) {
 #else
   const std::uint64_t MAGIC = 0x02'04'08'10'20'40'81ull;
   const std::uint64_t bits =
-    ((v[0] * MAGIC) >> 56) |
-    (((v[1] * MAGIC) >> 56) << 8) |
-    (((v[2] * MAGIC) >> 56) << 16) |
-    (((v[3] * MAGIC) >> 56) << 24) |
-    (((v[4] * MAGIC) >> 56) << 32) |
-    (((v[5] * MAGIC) >> 56) << 40) |
-    (((v[6] * MAGIC) >> 56) << 48) |
-    (((v[7] * MAGIC) >> 56) << 56);
+    (((v[0] & msb) * MAGIC) >> 56) |
+    (((v[1] & msb) * MAGIC) >> 56) << 8 |
+    (((v[2] & msb) * MAGIC) >> 56) << 16 |
+    (((v[3] & msb) * MAGIC) >> 56) << 24 |
+    (((v[4] & msb) * MAGIC) >> 56) << 32 |
+    (((v[5] & msb) * MAGIC) >> 56) << 40 |
+    (((v[6] & msb) * MAGIC) >> 56) << 48 |
+    (((v[7] & msb) * MAGIC) >> 56) << 56;
     return bits;
 #endif
 }
@@ -178,14 +178,14 @@ void get_slashdot(const std::uint64_t* lhs,
   };
 
   const std::uint64_t result[] = {
-    (zero_if_equal[0] - lsb) & ~zero_if_equal[0] & msb,
-    (zero_if_equal[1] - lsb) & ~zero_if_equal[1] & msb,
-    (zero_if_equal[2] - lsb) & ~zero_if_equal[2] & msb,
-    (zero_if_equal[3] - lsb) & ~zero_if_equal[3] & msb,
-    (zero_if_equal[4] - lsb) & ~zero_if_equal[4] & msb,
-    (zero_if_equal[5] - lsb) & ~zero_if_equal[5] & msb,
-    (zero_if_equal[6] - lsb) & ~zero_if_equal[6] & msb,
-    (zero_if_equal[7] - lsb) & ~zero_if_equal[7] & msb,
+    (zero_if_equal[0] - lsb) & ~zero_if_equal[0],
+    (zero_if_equal[1] - lsb) & ~zero_if_equal[1],
+    (zero_if_equal[2] - lsb) & ~zero_if_equal[2],
+    (zero_if_equal[3] - lsb) & ~zero_if_equal[3],
+    (zero_if_equal[4] - lsb) & ~zero_if_equal[4],
+    (zero_if_equal[5] - lsb) & ~zero_if_equal[5],
+    (zero_if_equal[6] - lsb) & ~zero_if_equal[6],
+    (zero_if_equal[7] - lsb) & ~zero_if_equal[7],
   };
 
   const std::uint64_t slash_or_dot = compress(result);
@@ -945,10 +945,8 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
       // Flush everything from pending_copy_from up to this first gap.
       const std::size_t pending_size =
           (src + skip_start) - pending_copy_from;
-      if (pending_size > 0) {
-        ::memmove(dst, pending_copy_from, pending_size);
-        dst += pending_size;
-      }
+      ::memmove(dst, pending_copy_from, pending_size);
+      dst += pending_size;
 
       // Now walk through alternating skip/keep ranges within this chunk.
       for (;;) {
@@ -993,8 +991,6 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   }
   dst += src - pending_copy_from;
   
-  // TODO: make SWAR?
-
   // Remove trailing path separator if any, but keep the initial
   // path separator(s) if there was one (or two on Windows).
   if (dst > dst_start && IsPathSeparator(dst[-1]))
