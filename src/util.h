@@ -70,6 +70,8 @@ void CanonicalizePath2(std::string* path, uint64_t* slash_bits);
 void CanonicalizePath2(char* path, size_t* len, uint64_t* slash_bits);
 void CanonicalizePath3(std::string* path, uint64_t* slash_bits);
 void CanonicalizePath3(char* path, size_t* len, uint64_t* slash_bits);
+void CanonicalizePath4(std::string* path, uint64_t* slash_bits);
+void CanonicalizePath4(char* path, size_t* len, uint64_t* slash_bits);
 
 /// Appends |input| to |*result|, escaping according to the whims of either
 /// Bash, or Win32's CommandLineToArgvW().

@@ -382,8 +382,9 @@ int main() {
 
   std::string pathCopies;
   pathCopies.resize(kNumRepetitions * max_size);
-  runBenchmarks(disambiguation3, "CanonicalizePath3 (passthrough)", pathCopies);
   runBenchmarks(disambiguation2, "CanonicalizePath2 (SWAR)", pathCopies);
+  runBenchmarks(disambiguation3, "CanonicalizePath4 (passthrough2)", pathCopies);
+  runBenchmarks(disambiguation3, "CanonicalizePath3 (passthrough)", pathCopies);
   runBenchmarks(disambiguation, "CanonicalizePath (original)", pathCopies);
   //runBenchmarks(disambiguation3, "CanonicalizePath3", pathCopies);
   //runBenchmarks(CheatyPath, "CheatyPath", pathCopies);
