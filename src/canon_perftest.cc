@@ -96,6 +96,11 @@ static bool IsPathSeparator(char c) {
 #endif
 }
 
+void disambiguation4(char* path, std::size_t* len, std::uint64_t* slash_bits) {
+  // Disambiguate between overloads of CanonicalizePath
+  CanonicalizePath4(path, len, slash_bits);
+}
+
 void disambiguation3(char* path, std::size_t* len, std::uint64_t* slash_bits) {
   // Disambiguate between overloads of CanonicalizePath
   CanonicalizePath3(path, len, slash_bits);
@@ -328,7 +333,7 @@ const int kNumRepeats = 20;
 template <typename CANONICALIZE_PATH>
 void runBenchmarks(CANONICALIZE_PATH&& f, const char* name,
                    std::string& pathCopies) {
-  printf("%s\n", name);
+  printf("\n%s\n", name);
 
   int sum_of_min = 0;
   int sum_of_max = 0;
@@ -383,8 +388,8 @@ int main() {
   std::string pathCopies;
   pathCopies.resize(kNumRepetitions * max_size);
   runBenchmarks(disambiguation2, "CanonicalizePath2 (SWAR)", pathCopies);
-  runBenchmarks(disambiguation3, "CanonicalizePath4 (passthrough2)", pathCopies);
-  runBenchmarks(disambiguation3, "CanonicalizePath3 (passthrough)", pathCopies);
+  runBenchmarks(disambiguation4, "CanonicalizePath4 (loop then switch)", pathCopies);
+  runBenchmarks(disambiguation3, "CanonicalizePath3 (duff)", pathCopies);
   runBenchmarks(disambiguation, "CanonicalizePath (original)", pathCopies);
   //runBenchmarks(disambiguation3, "CanonicalizePath3", pathCopies);
   //runBenchmarks(CheatyPath, "CheatyPath", pathCopies);
