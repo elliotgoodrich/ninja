@@ -67,6 +67,10 @@
 #include <immintrin.h>
 #include <cstring>
 
+#if defined(__linux__)
+#define NEEDS_BMI2_INTRINSICS __attribute__((target("bmi2")))
+#endif
+
 using namespace std;
 
 namespace {
@@ -132,7 +136,7 @@ std::array<std::uint64_t, 8> msb_equal(const std::uint64_t* lhs,
   return result;
 }
 
-//__attribute__((target("bmi2")))
+NEEDS_BMI2_INTRINSICS 
 std::uint64_t compress(const std::uint64_t *v) {
 #if 1
   const std::uint64_t bits =
@@ -730,7 +734,7 @@ void CanonicalizePathTwiceMemChr(char* path, size_t* len, uint64_t* slash_bits) 
 const std::uint64_t all_dots = lsb * '.';
 const std::uint64_t mask = ~lsb;
 
-//__attribute__((target("bmi2")))
+NEEDS_BMI2_INTRINSICS 
 std::uint64_t get_slashdot_indicator(const std::uint64_t word) {
   const std::uint64_t zero_if_equal = (word & mask) ^ all_dots;
   const std::uint64_t corrected = (zero_if_equal - lsb) & ~zero_if_equal;
@@ -748,9 +752,10 @@ void CanonicalizePath2(string* path, uint64_t* slash_bits) {
     path->erase(path->begin() + len, path->end());
   }
 }
-//__attribute__((target("bmi2")))
+
+NEEDS_BMI2_INTRINSICS 
 void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
-#define NEED_BACKSLASH 1
+#define NEED_BACKSLASH 0
   const char* src = path;
   char* dst = path;
   const char* dst_start = dst;
@@ -1023,7 +1028,7 @@ void CanonicalizePath4(string* path, uint64_t* slash_bits) {
   }
 }
 
-//__attribute__((target("bmi2")))
+NEEDS_BMI2_INTRINSICS 
 void CanonicalizePath4(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   const char* src = path;
   char* dst = path;
@@ -1124,7 +1129,7 @@ void CanonicalizePath3(string* path, uint64_t* slash_bits) {
   }
 }
 
-//__attribute__((target("bmi2")))
+NEEDS_BMI2_INTRINSICS 
 void CanonicalizePath3(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   const char* src = path;
   char* dst = path;
