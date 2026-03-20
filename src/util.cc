@@ -132,7 +132,7 @@ std::array<std::uint64_t, 8> msb_equal(const std::uint64_t* lhs,
   return result;
 }
 
-__attribute__((target("bmi2")))
+//__attribute__((target("bmi2")))
 std::uint64_t compress(const std::uint64_t *v) {
 #if 1
   const std::uint64_t bits =
@@ -204,7 +204,7 @@ std::uint64_t convert_backslashes_msb(const std::uint64_t text, const std::uint6
 }
 
 void convert_backslashes(std::uint64_t* text,
-                         std::array<std::uint64_t, 8> backslashes_msb) {
+                         const std::uint64_t* backslashes_msb) {
 #define EQUAL_TEST(I) text[I] ^= (backslashes_msb[I] >> 7) * 0x73ull;
 
   EQUAL_TEST(0);
@@ -730,7 +730,7 @@ void CanonicalizePathTwiceMemChr(char* path, size_t* len, uint64_t* slash_bits) 
 const std::uint64_t all_dots = lsb * '.';
 const std::uint64_t mask = ~lsb;
 
-__attribute__((target("bmi2")))
+//__attribute__((target("bmi2")))
 std::uint64_t get_slashdot_indicator(const std::uint64_t word) {
   const std::uint64_t zero_if_equal = (word & mask) ^ all_dots;
   const std::uint64_t corrected = (zero_if_equal - lsb) & ~zero_if_equal;
@@ -748,8 +748,9 @@ void CanonicalizePath2(string* path, uint64_t* slash_bits) {
     path->erase(path->begin() + len, path->end());
   }
 }
-__attribute__((target("bmi2")))
+//__attribute__((target("bmi2")))
 void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
+#define NEED_BACKSLASH 1
   const char* src = path;
   char* dst = path;
   const char* dst_start = dst;
@@ -782,77 +783,65 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
 
   std::uint64_t partial_buffer[8];
   while (remaining) {
-    // For full 64-byte chunks, read directly from src without copying
-    // into an intermediate buffer. On x86-64 unaligned uint64_t loads
-    // are fast so reinterpret_cast is safe and avoids a 64-byte memcpy.
-    // For partial chunks we still need a padded buffer.
     std::uint64_t padding_to_remove;
-    const std::size_t chunk_size = std::min(remaining, sizeof(partial_buffer));
-    const std::size_t words_used = (chunk_size + 7) / 8;
-    partial_buffer[words_used - 1] = 0; // TODO: set '/'
-    std::memcpy(&partial_buffer, src, chunk_size);
-    padding_to_remove =
-        chunk_size == sizeof(partial_buffer)
-            ? 0
-            : ~((static_cast<std::uint64_t>(1) << (remaining)) - 1);
-    remaining -= chunk_size;
-
-    std::uint64_t slashdot_indicator = 0;
-#if 1
-    // chunk_size between 1 and 64.
-    for (int i = 0; i < ((chunk_size - 1) / 8); ++i) {
-      slashdot_indicator |= get_slashdot_indicator(partial_buffer[i]) << (i * 8);
+    std::size_t chunk_size;
+    if (remaining >= sizeof(partial_buffer)) {
+      std::memcpy(&partial_buffer, src, sizeof(partial_buffer));
+      padding_to_remove = 0;
+      chunk_size = sizeof(partial_buffer);
+    } else {
+      chunk_size = remaining;
+      std::memcpy(&partial_buffer, src, chunk_size);
+      reinterpret_cast<char*>(partial_buffer)[chunk_size] = '/';
+      std::memset(reinterpret_cast<char*>(partial_buffer) + chunk_size + 1,
+                  '\0', sizeof(partial_buffer) - chunk_size - 1);
+      padding_to_remove =
+              ~((static_cast<std::uint64_t>(1) << (chunk_size)) - 1);
     }
-#else
-    switch ((chunk_size + 7) / 8) {
-    case 8:
-      slashdot_indicator |= get_slashdot_indicator(partial_buffer[7]) << 56;
-    case 7:
-      slashdot_indicator |= get_slashdot_indicator(partial_buffer[6]) << 48;
-    case 6:
-      slashdot_indicator |= get_slashdot_indicator(partial_buffer[5]) << 40;
-    case 5:
-      slashdot_indicator |= get_slashdot_indicator(partial_buffer[4]) << 32;
-    case 4:
-      slashdot_indicator |= get_slashdot_indicator(partial_buffer[3]) << 24;
-    case 3:
-      slashdot_indicator |= get_slashdot_indicator(partial_buffer[2]) << 16;
-    case 2:
-      slashdot_indicator |= get_slashdot_indicator(partial_buffer[1]) << 8;
-    case 1:
-      slashdot_indicator |= get_slashdot_indicator(partial_buffer[0]);
+
+    remaining -= chunk_size;
+    std::uint64_t slashdot_indicator = 0;
+    std::uint64_t backslashes_msb[8] = {};
+    // chunk_size between 1 and 64.
+    const std::size_t words_used = (chunk_size + 7) / 8;
+    const std::uint64_t backslash = 0x0101010101010101ull * '\\';
+    std::uint64_t all_backslash = 0;
+    for (int i = 0; i < words_used; ++i) {
+      slashdot_indicator |= get_slashdot_indicator(partial_buffer[i]) << (i * 8);
+#if NEED_BACKSLASH
+      const std::uint64_t zero_if_equal = partial_buffer[i] ^ backslash;
+      backslashes_msb[i] = (zero_if_equal - lsb) & ~zero_if_equal;
+      all_backslash |= backslashes_msb[i];
+#endif
+    }
+
+#if NEED_BACKSLASH
+    // Convert backslashes if we have any
+    std::uint64_t backslash_bits = 0;
+    if (all_backslash & msb) {
+      for (int i = 0; i < words_used; ++i) {
+        backslashes_msb[i] &= msb;
+      }
+      backslash_bits = compress(backslashes_msb);
+      convert_backslashes(partial_buffer, backslashes_msb);
+      std::memcpy(const_cast<char*>(src), partial_buffer, chunk_size);
     }
 #endif
 
+    // Quick exit
     if ((slashdot_indicator & (slashdot_indicator << 1)) == 0) {
-      src += 64;
+      src += chunk_size;
       mutable_chars = ~static_cast<std::uint64_t>(0);
       continue;
     }
 
-    std::uint64_t forwardslash_bits;
-    std::uint64_t dot_bits;
-    get_slashdot(partial_buffer, &forwardslash_bits, &dot_bits);
-#define NEED_BACKSLASH 1
-#if NEED_BACKSLASH
-    std::array<std::uint64_t, 8> backslashes = msb_equal(partial_buffer, '\\');
-    std::uint64_t backslash_bits = 0;
-    // Assume we don't have backslashes and try to skip some comparatively expensive work
-    if (msb & (backslashes[0] | backslashes[1] | backslashes[2] | backslashes[3] |
-        backslashes[4] | backslashes[5] | backslashes[6] | backslashes[7])) {
-      backslashes[0] &= msb;
-      backslashes[1] &= msb;
-      backslashes[2] &= msb;
-      backslashes[3] &= msb;
-      backslashes[4] &= msb;
-      backslashes[5] &= msb;
-      backslashes[6] &= msb;
-      backslashes[7] &= msb;
-      backslash_bits = compress(backslashes.data());
-      convert_backslashes(partial_buffer, backslashes);
-      std::memcpy(const_cast<char*>(src), partial_buffer, chunk_size);
+    std::uint64_t is_lsb_set[8] = {};
+    for (int i = 0; i < words_used; ++i) {
+      is_lsb_set[i] = (partial_buffer[i] & lsb) << 7;
     }
-#endif
+    const std::uint64_t low_bit_set = compress(is_lsb_set);
+    const std::uint64_t forwardslash_bits = slashdot_indicator & low_bit_set;
+    const std::uint64_t dot_bits = slashdot_indicator & ~low_bit_set;
 
     const std::uint64_t slash_bits =
 #if NEED_BACKSLASH
@@ -882,20 +871,6 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
         ((dot_bits << 2u) | (previous_dots << 1u)) &
         ((dot_bits << 1u) | previous_dots) &
       slash_bits;
-
-    // Fast path: nothing to remove in this chunk (common case).
-    // No empty paths, no ".", no ".." — just advance src and let the
-    // pending copy region grow.  The actual memmove is deferred until
-    // we hit a gap (or the end of the path).
-    /*
-    if ((to_remove | parent_path_indicator) == padding_to_remove) {
-      src += chunk_size;
-      previous_slashes = slash_bits >> 63;
-      previous_dots = dot_bits >> 63;
-      mutable_chars = ~static_cast<std::uint64_t>(0);
-      continue;
-    }
-    */
 
     // For each parent path, find and mark the previous directory for removal
     std::uint64_t remaining_parent = parent_path_indicator;
@@ -1048,7 +1023,7 @@ void CanonicalizePath4(string* path, uint64_t* slash_bits) {
   }
 }
 
-__attribute__((target("bmi2")))
+//__attribute__((target("bmi2")))
 void CanonicalizePath4(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   const char* src = path;
   char* dst = path;
@@ -1149,7 +1124,7 @@ void CanonicalizePath3(string* path, uint64_t* slash_bits) {
   }
 }
 
-__attribute__((target("bmi2")))
+//__attribute__((target("bmi2")))
 void CanonicalizePath3(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   const char* src = path;
   char* dst = path;
