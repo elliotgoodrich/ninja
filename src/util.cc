@@ -69,6 +69,8 @@
 
 #if defined(__linux__)
 #define NEEDS_BMI2_INTRINSICS __attribute__((target("bmi2")))
+#else
+#define NEEDS_BMI2_INTRINSICS
 #endif
 
 using namespace std;
@@ -755,7 +757,7 @@ void CanonicalizePath2(string* path, uint64_t* slash_bits) {
 
 NEEDS_BMI2_INTRINSICS 
 void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
-#define NEED_BACKSLASH 0
+#define NEED_BACKSLASH 1
   const char* src = path;
   char* dst = path;
   const char* dst_start = dst;
@@ -828,6 +830,7 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
         backslashes_msb[i] &= msb;
       }
       backslash_bits = compress(backslashes_msb);
+      slashdot_indicator |= backslash_bits;
       convert_backslashes(partial_buffer, backslashes_msb);
       std::memcpy(const_cast<char*>(src), partial_buffer, chunk_size);
     }
