@@ -907,6 +907,16 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
         ((dot_bits << 1u) | (previous_dots >> 63)) & slash_bits;
     const std::uint64_t current_path_to_remove =
         current_path_indicator | (current_path_indicator >> 1u);
+    if (current_path_indicator == 1) {
+      // In this case we have a "/./" that spans across 2 blocks and we need to
+      // remove the "." that is at the end of the last block
+      const std::size_t count = src - pending_copy_from - 1;
+      if (pending_copy_from != dst) {
+        ::memmove(dst, pending_copy_from, count);
+      }
+      pending_copy_from = src;
+      dst += count;
+    }
     to_remove |= current_path_to_remove;
 
     // Look at parent path /../ (bit set on the last slash)
