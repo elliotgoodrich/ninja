@@ -762,7 +762,8 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   char* dst = path;
   const char* dst_start = dst;
   std::size_t remaining = *len;
-  std::uint64_t previous_slashes = 1;
+
+  std::uint64_t previous_slashes = static_cast<std::uint64_t>(1) << 63;
   std::uint64_t previous_dots = 0;
 
   std::uint64_t output_slashes = 0;
@@ -879,7 +880,7 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
 #if NEED_BACKSLASH
     // Quick exit if we do need to update slash_bits
     const std::uint64_t previous_slashdot = previous_slashes | previous_dots;
-    if ((slashdot_indicator & ((slashdot_indicator << 1) | previous_slashdot)) == 0) {
+    if ((slashdot_indicator & ((slashdot_indicator << 1) | (previous_slashdot >> 63))) == 0) {
       src += chunk_size;
       mutable_chars = ~static_cast<std::uint64_t>(0);
       const std::uint64_t to_keep = ~to_remove;
@@ -889,30 +890,30 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
             << slash_count;
       }
       slash_count += popcnt64(to_keep & slash_bits);
-      previous_slashes = slash_bits >> 63;
-      previous_dots = dot_bits >> 63;
+      previous_slashes = slash_bits;
+      previous_dots = dot_bits;
       continue;
     }
 #endif
 
     // Look at empty paths (bit set for each slash with a preceeding slash)
     const std::uint64_t empty_paths_to_remove =
-        slash_bits & ((slash_bits << 1u) | previous_slashes);
+        slash_bits & ((slash_bits << 1u) | (previous_slashes >> 63));
     to_remove |= empty_paths_to_remove;
 
     // Look at current path /./ (bit set on the last slash)
     const std::uint64_t current_path_indicator =
-        ((slash_bits << 2u) | (previous_slashes << 1u)) &
-        ((dot_bits << 1u) | previous_dots) & slash_bits;
+        ((slash_bits << 2u) | (previous_slashes >> 62)) &
+        ((dot_bits << 1u) | (previous_dots >> 63)) & slash_bits;
     const std::uint64_t current_path_to_remove =
         current_path_indicator | (current_path_indicator >> 1u);
     to_remove |= current_path_to_remove;
 
     // Look at parent path /../ (bit set on the last slash)
     const std::uint64_t parent_path_indicator =
-        ((slash_bits << 3u) | (previous_slashes << 2u)) &
-        ((dot_bits << 2u) | (previous_dots << 1u)) &
-        ((dot_bits << 1u) | previous_dots) &
+        ((slash_bits << 3u) | (previous_slashes >> 61)) &
+        ((dot_bits << 2u) | (previous_dots >> 62)) &
+        ((dot_bits << 1u) | (previous_dots >> 63)) &
       slash_bits;
 
     // For each parent path, find and mark the previous directory for removal
@@ -1033,8 +1034,8 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     // pending_copy_from stays where it was — the region keeps growing.
     done_copying:
     src += 64;
-    previous_slashes = slash_bits >> 63;
-    previous_dots = dot_bits >> 63;
+    previous_slashes = slash_bits;
+    previous_dots = dot_bits;
     mutable_chars = ~static_cast<std::uint64_t>(0);
   }
 
