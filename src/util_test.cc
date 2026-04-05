@@ -290,11 +290,21 @@ TEST(CanonicalizePath, LongStringTest) {
     EXPECT_EQ(0, slash_bits);
   }
 
-  for (int i = 60; i < 200; ++i) {
+  for (int i = 0; i < 200; ++i) {
     path.assign(i, 'a');
     expected = path;
     path += "/b/./c.h";
     expected += "/b/c.h";
+    CanonicalizePath2(&path, &slash_bits);
+    EXPECT_EQ(path, expected) << "i=" << i;
+    EXPECT_EQ(0, slash_bits);
+  }
+
+  for (int i = 0; i < 200; ++i) {
+    path.assign(i, 'a');
+    expected = path;
+    path += "/x/y/z/../../../c.h";
+    expected += "/c.h";
     CanonicalizePath2(&path, &slash_bits);
     EXPECT_EQ(path, expected) << "i=" << i;
     EXPECT_EQ(0, slash_bits);
