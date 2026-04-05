@@ -257,6 +257,50 @@ TEST(CanonicalizePath, PathSamplesWindows) {
   EXPECT_EQ("/", path);
 }
 
+TEST(CanonicalizePath, LongStringTest) {
+  string path;
+  uint64_t slash_bits;
+  string expected;
+
+  for (int i = 1; i < 200; ++i) {
+    path.assign(i, 'a');
+    path += ".h";
+    expected = path;
+    CanonicalizePath2(&path, &slash_bits);
+    EXPECT_EQ(path, expected);
+    EXPECT_EQ(0, slash_bits);
+  }
+
+  for (int i = 1; i < 200; ++i) {
+    path.assign(i, 'a');
+    path += "/b/c.h";
+    expected = path;
+    CanonicalizePath2(&path, &slash_bits);
+    EXPECT_EQ(path, expected);
+    EXPECT_EQ(0, slash_bits);
+  }
+
+  for (int i = 1; i < 200; ++i) {
+    path.assign(i, 'a');
+    expected = path;
+    path += "//c.h";
+    expected += "/c.h";
+    CanonicalizePath2(&path, &slash_bits);
+    EXPECT_EQ(path, expected) << "i=" << i;
+    EXPECT_EQ(0, slash_bits);
+  }
+
+  for (int i = 60; i < 200; ++i) {
+    path.assign(i, 'a');
+    expected = path;
+    path += "/b/./c.h";
+    expected += "/b/c.h";
+    CanonicalizePath2(&path, &slash_bits);
+    EXPECT_EQ(path, expected) << "i=" << i;
+    EXPECT_EQ(0, slash_bits);
+  }
+}
+
 TEST(CanonicalizePath, SlashTracking) {
   string path;
   uint64_t slash_bits;
