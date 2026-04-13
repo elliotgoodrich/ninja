@@ -104,6 +104,14 @@ TEST(CanonicalizePath, PathSamples) {
   CanonicalizePath(&path);
   EXPECT_EQ("foo", path);
 
+  path = "aa/b/c/.";
+  CanonicalizePath(&path);
+  EXPECT_EQ("aa/b/c", path);
+
+  path = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/b/c/.";
+  CanonicalizePath(&path);
+  EXPECT_EQ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/b/c", path);
+
   path = "foo/bar/..";
   CanonicalizePath(&path);
   EXPECT_EQ("foo", path);
@@ -191,6 +199,10 @@ TEST(CanonicalizePath, PathSamples) {
   path = "foo/.._bar";
   CanonicalizePath(&path);
   EXPECT_EQ("foo/.._bar", path);
+
+  path = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/x/y/z/../../../c.h";
+  CanonicalizePath(&path);
+  EXPECT_EQ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/c.h", path);
 }
 
 #ifdef _WIN32
@@ -261,6 +273,16 @@ TEST(CanonicalizePath, LongStringTest) {
   string path;
   uint64_t slash_bits;
   string expected;
+
+  for (int i = 1; i < 200; ++i) {
+    path.assign(i, 'a');
+    expected = path;
+    path += "/b/c/.";
+    expected += "/b/c";
+    CanonicalizePath2(&path, &slash_bits);
+    EXPECT_EQ(path, expected);
+    EXPECT_EQ(0, slash_bits);
+  }
 
   for (int i = 1; i < 200; ++i) {
     path.assign(i, 'a');

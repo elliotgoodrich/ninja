@@ -769,7 +769,7 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   std::uint64_t output_slashes = 0;
   std::uint64_t slash_count = 0;
 
-  // Keep a bitmask for characters that are mutable (not removable by "..")
+  // Keep a bitmask for characters that are mutable (removable by "..")
   std::uint64_t mutable_chars = ~static_cast<std::uint64_t>(0);
 
   // Preserve the initial slash (or double slash on windows)
@@ -790,28 +790,33 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   const char* pending_copy_from = src;
 
   std::uint64_t buffer[8];
-  while (remaining) {
+  const char* buffer_view = reinterpret_cast<const char *>(buffer);
+  std::size_t words_used;
+  bool keep_going = remaining > 0;
+  while (keep_going) {
     std::uint64_t padding_to_remove;
     std::size_t chunk_size;
     if (remaining >= sizeof(buffer)) {
       std::memcpy(&buffer, src, sizeof(buffer));
       padding_to_remove = 0;
       chunk_size = sizeof(buffer);
+      words_used = 8;
     } else {
       chunk_size = remaining;
       std::memcpy(&buffer, src, chunk_size);
       reinterpret_cast<char*>(buffer)[chunk_size] = '/';
       std::memset(reinterpret_cast<char*>(buffer) + chunk_size + 1,
-                  '\0', sizeof(buffer) - chunk_size - 1);
+                  '0', sizeof(buffer) - chunk_size - 1);
       padding_to_remove =
               ~((static_cast<std::uint64_t>(1) << (chunk_size)) - 1);
+      // If we have 8 chars, we want to have 2 words since we want the trailing '/'
+      words_used = (chunk_size / 8) + 1;
+      keep_going = false;
     }
 
     remaining -= chunk_size;
     std::uint64_t slashdot_indicator = 0;
     std::uint64_t backslashes_msb[8];
-    // chunk_size between 1 and 64.
-    const std::size_t words_used = (chunk_size + 7) / 8;
     const std::uint64_t backslash = 0x0101010101010101ull * '\\';
     std::uint64_t all_backslash = 0;
     for (int i = 0; i < words_used; ++i) {
