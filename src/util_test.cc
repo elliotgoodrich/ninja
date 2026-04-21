@@ -331,6 +331,19 @@ TEST(CanonicalizePath, LongStringTest) {
     EXPECT_EQ(path, expected) << "i=" << i;
     EXPECT_EQ(0, slash_bits);
   }
+
+  for (int i = 0; i < 40; ++i) {
+    path = "";
+    for (int j = 0; j < i; ++j) {
+      path += "../";
+    }
+    expected = path;
+    path += "path/../a.h";
+    expected += "a.h";
+    CanonicalizePath2(&path, &slash_bits);
+    EXPECT_EQ(path, expected) << "i=" << i;
+    EXPECT_EQ(0, slash_bits);
+  }
 }
 
 TEST(CanonicalizePath, SlashTracking) {
