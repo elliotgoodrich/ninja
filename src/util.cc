@@ -745,6 +745,159 @@ std::uint64_t get_slashdot_indicator(const std::uint64_t word) {
   return bits;
 }
 
+struct CountAndValue {
+  int count = 0;
+  bool value = false;
+};
+
+struct Biterator {
+  std::uint64_t bits_;
+  std::uint64_t total_;
+  CountAndValue value_;
+  Biterator(std::uint64_t bits) : bits_(bits), total_(0), value_() {
+    value_.value = true;
+    ++*this;
+  }
+
+  Biterator& operator++() {
+    unsigned long first_bit_set;
+    if (!bit_scan_forward64(&first_bit_set, bits_)) {
+      value_.count = sizeof(bits_) - value_.count;
+      assert(total_ + value_.count == 64);
+      total_ = 64;
+    } else {
+      total_ += value_.count - first_bit_set;
+      const std::uint64_t mask = static_cast<std::uint64_t>(1) << first_bit_set;
+      bits_ = ~(mask & bits_);
+      value_.value = !value_.value;
+    }
+
+    return *this;
+  }
+
+  CountAndValue operator*() const { return value_; };
+};
+
+struct EndSentinel {};
+
+bool operator==(const Biterator& lhs, EndSentinel) {
+  return lhs.total_ == 64;
+}
+
+bool operator!=(const Biterator& lhs, EndSentinel rhs) {
+  return !(lhs == rhs);
+}
+
+struct BitRange {
+  std::uint64_t bits_;
+  unsigned long skip_start_;
+  BitRange(std::uint64_t bits) : bits_(bits), skip_start_(0) {}
+
+  Biterator begin() { return Biterator(bits_); }
+
+  EndSentinel end() { return EndSentinel(); }
+};
+
+struct ChunkedReader {
+  char* src_;
+  std::size_t remaining_;
+  bool keep_going_;
+
+  ChunkedReader(char* string, std::size_t len)
+      : src_(string), remaining_(len), keep_going_(len > 0) {}
+
+  /// Read at most \a buffer_size bytes into \a buffer and increment
+  /// the read pointer by the number of bytes read.  Return a pointer
+  /// to the next bytes to read, or \c nullptr if there are no more bytes to
+  /// read.
+  char *read(char *buffer, std::size_t* buffer_size) {
+    assert(*buffer_size <= 64);
+    if (!keep_going_) {
+      return nullptr;
+    }
+
+    const std::size_t buffer_capacity = *buffer_size;
+    if (remaining_ >= buffer_capacity) {
+      std::memcpy(buffer, src_, buffer_capacity);
+    } else {
+      *buffer_size = remaining_;
+      std::memcpy(buffer, src_, remaining_);
+      const char padding[64] =
+          "/"
+          "\0\0\0\0\0\0\0\0"
+          "\0\0\0\0\0\0\0\0"
+          "\0\0\0\0\0\0\0\0"
+          "\0\0\0\0\0\0\0\0"
+          "\0\0\0\0\0\0\0\0"
+          "\0\0\0\0\0\0\0\0"
+          "\0\0\0\0\0\0\0\0"
+          "\0\0\0\0\0\0";
+      std::memcpy(buffer + remaining_, padding,
+                  buffer_capacity - remaining_ - 1);
+      keep_going_ = false;
+    }
+    char* ret = src_;
+    src_ += *buffer_size;
+    return ret;
+  }
+
+};
+
+struct InPlaceStringModifier {
+  // "abc"
+  // all start at a
+  // if we keep (1), then move src forward 1 and dst forward 1
+  // if we skip (1), then move src forward 1 and dst stays
+  // if we then keep(1), we move src forward 1
+
+  // "abcdjsk;fdiofsaifs"
+  //      ^ dst
+  //          ^ src
+  //        ^ pending_copy_from
+  // Output is
+  // [dst, pending_copy_from)
+          
+  char* dst_; /// Where we are writing to.
+  const char* pending_copy_from_;
+  char* src_; /// Where we are reading from.
+
+  /// Read from and write to the \a string of length \a len.
+  explicit InPlaceStringModifier(char* string, std::size_t len)
+      : dst_(string), src_(string), pending_copy_from_(string) {}
+
+  /// Write \a count bytes from the current read position to the current write
+  /// position.  Increment both the read and write positions by \a count bytes.
+  void keep(std::size_t count) {
+    TODO, not sure how to do keep/remove
+    if (pending_copy_from_ != dst_) {
+      ::memmove(dst_, pending_copy_from_, src_ - pending_copy_from_);
+    }
+    src_ += count;
+    dst_ += count;
+    pending_copy_from_ = src_;
+  }
+
+  /// Increment the read position by \a length bytes, effectively skipping
+  /// that many bytes without copying them to the write position.
+  void remove(std::size_t count) {
+    src_ += count;
+  }
+
+  /// Undo writing the last \a count bytes, effectively moving the write
+  /// position.
+  void undo(std::size_t count);
+
+  /// Return the current write position.
+  char* write_pos() { return dst_; }
+
+  /// TODO
+  char *flush() {
+    ::memmove(dst_, pending_copy_from_, pending_count_);
+    dst_ += pending_count_;
+    pending_count_ = 0;
+    return dst_;
+  }
+};
 
 void CanonicalizePath2(string* path, uint64_t* slash_bits) {
   std::size_t len = path->size();
@@ -758,10 +911,7 @@ void CanonicalizePath2(string* path, uint64_t* slash_bits) {
 NEEDS_BMI2_INTRINSICS 
 void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
 #define NEED_BACKSLASH 1
-  const char* src = path;
-  char* dst = path;
-  const char* dst_start = dst;
-  std::size_t remaining = *len;
+  const char* dst_start = path;
 
   std::uint64_t previous_slashes = static_cast<std::uint64_t>(1) << 63;
   std::uint64_t previous_dots = 0;
@@ -773,8 +923,8 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   std::uint64_t mutable_chars = ~static_cast<std::uint64_t>(0);
 
   // Preserve the initial slash (or double slash on windows)
-  if (remaining >= 1 && IsPathSeparator(src[0])) {
-    if (remaining >= 2 && IsPathSeparator(src[1])) {
+  if (*len >= 1 && IsPathSeparator(path[0])) {
+    if (*len >= 2 && IsPathSeparator(path[1])) {
       mutable_chars = ~static_cast<std::uint64_t>(0b11);
       dst_start += 2;
     }
@@ -787,34 +937,18 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   // Track the start of a contiguous region we haven't copied yet.
   // This lets us batch fast-path chunks and only call memmove when
   // we actually encounter characters to remove.
-  const char* pending_copy_from = src;
+  InPlaceStringModifier writer(path, *len);
+  ChunkedReader reader(path, *len);
 
   std::uint64_t buffer[8];
-  const char* buffer_view = reinterpret_cast<const char *>(buffer);
-  std::size_t words_used;
-  bool keep_going = remaining > 0;
-  while (keep_going) {
-    std::uint64_t padding_to_remove;
-    std::size_t chunk_size;
-    if (remaining >= sizeof(buffer)) {
-      std::memcpy(&buffer, src, sizeof(buffer));
-      padding_to_remove = 0;
-      chunk_size = sizeof(buffer);
-      words_used = 8;
-    } else {
-      chunk_size = remaining;
-      std::memcpy(&buffer, src, chunk_size);
-      reinterpret_cast<char*>(buffer)[chunk_size] = '/';
-      std::memset(reinterpret_cast<char*>(buffer) + chunk_size + 1,
-                  '0', sizeof(buffer) - chunk_size - 1);
-      padding_to_remove =
-              ~((static_cast<std::uint64_t>(1) << (chunk_size)) - 1);
-      // If we have 8 chars, we want to have 2 words since we want the trailing '/'
-      words_used = (chunk_size / 8) + 1;
-      keep_going = false;
-    }
+  std::size_t chunk_size = sizeof(buffer);
+  while (char *next = reader.read(reinterpret_cast<char *>(&buffer), &chunk_size)) {
+    const std::uint64_t padding_to_remove =
+        chunk_size == 64
+            ? 0
+            : ~((static_cast<std::uint64_t>(1) << (chunk_size)) - 1);
+    const std::size_t words_used = (chunk_size / 8) + 1;
 
-    remaining -= chunk_size;
     std::uint64_t slashdot_indicator = 0;
     std::uint64_t backslashes_msb[8];
     const std::uint64_t backslash = 0x0101010101010101ull * '\\';
@@ -850,7 +984,7 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
         backslash_bits |= bits << (i * 8);
       }
       slashdot_indicator |= backslash_bits;
-      std::memcpy(const_cast<char*>(src), buffer, chunk_size);
+      std::memcpy(next - chunk_size, buffer, chunk_size);
     }
 #endif
 
@@ -886,7 +1020,6 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     // Quick exit if we do need to update slash_bits
     const std::uint64_t previous_slashdot = previous_slashes | previous_dots;
     if ((slashdot_indicator & ((slashdot_indicator << 1) | (previous_slashdot >> 63))) == 0) {
-      src += chunk_size;
       mutable_chars = ~static_cast<std::uint64_t>(0);
       const std::uint64_t to_keep = ~to_remove;
       if (slash_count < 64) {
@@ -915,12 +1048,7 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     if (current_path_indicator == 1) {
       // In this case we have a "/./" that spans across 2 blocks and we need to
       // remove the "." that is at the end of the last block
-      const std::size_t count = src - pending_copy_from - 1;
-      if (pending_copy_from != dst) {
-        ::memmove(dst, pending_copy_from, count);
-      }
-      pending_copy_from = src;
-      dst += count;
+      writer.undo(1);
     }
     to_remove |= current_path_to_remove;
 
@@ -1002,63 +1130,21 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     slash_count += popcnt64(to_keep & slash_bits);
 #endif
 
-    // Copy kept characters from src to dst, skipping removed ones.
-    // We defer copying: `pending_copy_from` tracks the start of the
-    // accumulated region that hasn't been flushed yet (which may
-    // extend back into previous fast-path chunks).  We only call
-    // memmove when we encounter a gap.
-    std::uint64_t to_skip = mutable_chars & to_remove;
-
-    unsigned long skip_start;
-    if (bit_scan_forward64(&skip_start, to_skip)) {
-      // Flush everything from pending_copy_from up to this first gap.
-      const std::size_t pending_size =
-          (src + skip_start) - pending_copy_from;
-      ::memmove(dst, pending_copy_from, pending_size);
-      dst += pending_size;
-
-      // Now walk through alternating skip/keep ranges within this chunk.
-      for (;;) {
-        // Advance past the contiguous run of bits to skip.
-        to_skip += static_cast<std::uint64_t>(1) << skip_start;
-        unsigned long keep_start;
-        if (!bit_scan_forward64(&keep_start, to_skip)) {
-          // Everything from skip_start to end of chunk is removed.
-          pending_copy_from = src + 64;
-          goto done_copying;
-        }
-        to_skip ^= static_cast<std::uint64_t>(1) << keep_start;
-
-        // Find the next gap (or end of chunk).
-        unsigned long next_skip;
-        if (!bit_scan_forward64(&next_skip, to_skip)) {
-          // Keep region extends to end of chunk — don't copy yet,
-          // let it accumulate with the next chunk's fast path.
-          pending_copy_from = src + keep_start;
-          goto done_copying;
-        }
-
-        // Copy the keep region between two gaps.
-        const std::size_t size = next_skip - keep_start;
-        ::memmove(dst, src + keep_start, size);
-        dst += size;
-        skip_start = next_skip;
-      }
+    // Finally, copy or skip all the values we need to in the buffer.
+    for (const CountAndValue& v : BitRange(mutable_chars & to_remove)) {
+      if (v.value)
+        writer.remove(v.count);
+      else
+        writer.keep(v.count);
     }
-    // No bits to skip in this chunk at all (only padding was removed).
-    // pending_copy_from stays where it was — the region keeps growing.
-    done_copying:
-    src += 64;
+
     previous_slashes = slash_bits;
     previous_dots = dot_bits;
     mutable_chars = ~static_cast<std::uint64_t>(0);
   }
 
   // Flush any remaining pending copy region.
-  if (pending_copy_from != dst) {
-    ::memmove(dst, pending_copy_from, src - pending_copy_from);
-  }
-  dst += src - pending_copy_from;
+  char *dst = writer.flush();
   
   // Remove trailing path separator if any, but keep the initial
   // path separator(s) if there was one (or two on Windows).
