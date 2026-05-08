@@ -752,30 +752,59 @@ struct CountAndValue {
 
 struct Biterator {
   std::uint64_t bits_;
-  std::uint64_t total_;
-  CountAndValue value_;
-  Biterator(std::uint64_t bits) : bits_(bits), total_(0), value_() {
-    value_.value = true;
-    ++*this;
+  unsigned total_ = 0;
+  CountAndValue value_{};
+
+  explicit Biterator(std::uint64_t bits)
+      : bits_(bits) {
+    // Inspect the first bit once.
+    value_.value = (bits_ & 1ull) != 0;
+    read_next();
+  }
+
+  void read_next() {
+    assert(total_ != 64);
+    /*
+    if (total_ == 64) {
+      value_ = {};
+      return;
+    }
+    */
+
+    const std::uint64_t remaining_bits = bits_ >> total_;
+    const unsigned bits_left = 64 - total_;
+
+    const std::uint64_t value_mask =
+        0ull - static_cast<std::uint64_t>(value_.value);
+    const std::uint64_t changed = remaining_bits ^ value_mask;
+
+    unsigned long first_changed_bit;
+    const bool found_changed_bit =
+        bit_scan_forward64(&first_changed_bit, changed);
+
+    const unsigned count =
+        found_changed_bit
+            ? static_cast<unsigned>(first_changed_bit)
+            : bits_left;
+
+    assert(count > 0);
+    assert(count <= bits_left);
+
+    value_.count = count;
+    total_ += count;
+    value_.value = !value_.value;
   }
 
   Biterator& operator++() {
-    unsigned long first_bit_set;
-    if (!bit_scan_forward64(&first_bit_set, bits_)) {
-      value_.count = sizeof(bits_) - value_.count;
-      assert(total_ + value_.count == 64);
-      total_ = 64;
-    } else {
-      total_ += value_.count - first_bit_set;
-      const std::uint64_t mask = static_cast<std::uint64_t>(1) << first_bit_set;
-      bits_ = ~(mask & bits_);
-      value_.value = !value_.value;
-    }
-
+    read_next();
     return *this;
   }
 
-  CountAndValue operator*() const { return value_; };
+  CountAndValue operator*() const {
+    CountAndValue result = value_;
+    result.value = !result.value; // because read_next pre-flipped for next time
+    return result;
+  }
 };
 
 struct EndSentinel {};
@@ -836,9 +865,8 @@ struct ChunkedReader {
                   buffer_capacity - remaining_ - 1);
       keep_going_ = false;
     }
-    char* ret = src_;
     src_ += *buffer_size;
-    return ret;
+    return src_;
   }
 
 };
@@ -857,45 +885,52 @@ struct InPlaceStringModifier {
   // Output is
   // [dst, pending_copy_from)
           
-  char* dst_; /// Where we are writing to.
+  char* out_; /// Where we are writing to.
   const char* pending_copy_from_;
-  char* src_; /// Where we are reading from.
+  char* in_; /// Where we are reading from.
+  char* end_;
 
   /// Read from and write to the \a string of length \a len.
   explicit InPlaceStringModifier(char* string, std::size_t len)
-      : dst_(string), src_(string), pending_copy_from_(string) {}
+      : out_(string), in_(string), pending_copy_from_(string), end_(string + len) {}
 
   /// Write \a count bytes from the current read position to the current write
   /// position.  Increment both the read and write positions by \a count bytes.
   void keep(std::size_t count) {
-    TODO, not sure how to do keep/remove
-    if (pending_copy_from_ != dst_) {
-      ::memmove(dst_, pending_copy_from_, src_ - pending_copy_from_);
+    if (count && (out_ != in_)) {
+      ::memmove(out_, in_, count);
     }
-    src_ += count;
-    dst_ += count;
-    pending_copy_from_ = src_;
+    out_ += count;
+    in_ += count;
+    // We don't need to do anything
+    //if (pending_copy_from_ != dst_) {
+      //::memmove(dst_, pending_copy_from_, src_ - pending_copy_from_);
+    //}
+    //src_ += count;
+    //dst_ += count;
+    //pending_copy_from_ = src_;
   }
 
   /// Increment the read position by \a length bytes, effectively skipping
-  /// that many bytes without copying them to the write position.
+  /// that many bytes without copying them to the out position.
   void remove(std::size_t count) {
-    src_ += count;
+    in_ += count;
   }
 
-  /// Undo writing the last \a count bytes, effectively moving the write
+  /// Undo writing the last \a count bytes, rewinding the write
   /// position.
-  void undo(std::size_t count);
+  void undo(std::size_t count) {
+    out_ -= count;
+  }
 
   /// Return the current write position.
-  char* write_pos() { return dst_; }
+  char* write_pos() { return out_; }
 
   /// TODO
   char *flush() {
-    ::memmove(dst_, pending_copy_from_, pending_count_);
-    dst_ += pending_count_;
-    pending_count_ = 0;
-    return dst_;
+    //::memmove(dst_, pending_copy_from_, pending_count_);
+    keep(end_ - in_);
+    return out_;
   }
 };
 
@@ -906,6 +941,22 @@ void CanonicalizePath2(string* path, uint64_t* slash_bits) {
     CanonicalizePath2(str, &len, slash_bits);
     path->erase(path->begin() + len, path->end());
   }
+}
+
+NEEDS_BMI2_INTRINSICS 
+std::uint64_t get_slashdot_indicator(const std::uint64_t* buffer, std::size_t count) {
+  const std::uint64_t all_dots = lsb * '.';
+  const std::uint64_t mask = ~lsb;
+  std::uint64_t slashdot_indicator = 0;
+  for (int i = 0; i < count; ++i) {
+    const std::uint64_t zero_if_equal =
+        (buffer[i] & mask) ^ all_dots;
+    const std::uint64_t corrected = (zero_if_equal - lsb) & ~zero_if_equal;
+    const std::uint64_t bits =
+        _pext_u64(corrected, 0x80'80'80'80'80'80'80'80ull);
+    slashdot_indicator |= bits << (i * 8);
+  }
+  return slashdot_indicator;
 }
 
 NEEDS_BMI2_INTRINSICS 
