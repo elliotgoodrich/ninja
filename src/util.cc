@@ -952,11 +952,60 @@ std::uint64_t get_slashdot_indicator(const std::uint64_t* buffer, std::size_t co
     const std::uint64_t zero_if_equal =
         (buffer[i] & mask) ^ all_dots;
     const std::uint64_t corrected = (zero_if_equal - lsb) & ~zero_if_equal;
-    const std::uint64_t bits =
-        _pext_u64(corrected, 0x80'80'80'80'80'80'80'80ull);
+    const std::uint64_t bits = _pext_u64(corrected, msb);
     slashdot_indicator |= bits << (i * 8);
   }
   return slashdot_indicator;
+}
+
+std::uint64_t convert_backslashes(std::uint64_t* buffer, std::size_t count) {
+  const std::uint64_t backslashes = lsb * '\\';
+  std::uint64_t any_equal = 0;
+  std::uint64_t backslashes_msb[8];
+  for (int i = 0; i < count; ++i) {
+    const std::uint64_t zero_if_equal = buffer[i] ^ backslashes;
+    const std::uint64_t result = (zero_if_equal - lsb) & ~zero_if_equal;
+    backslashes_msb[i] = result;
+    any_equal |= result;
+  }
+
+  // Convert backslashes if we have any
+  std::uint64_t backslash_bits = 0;
+  if (any_equal & msb) {
+    for (int i = 0; i < count; ++i) {
+      const std::uint64_t tmp = backslashes_msb[i] & msb;
+      buffer[i] ^= (tmp >> 7) * 0x73ull;
+      const std::uint64_t bits =
+          _pext_u64(tmp, 0x80'80'80'80'80'80'80'80ull);
+      backslash_bits |= bits << (i * 8);
+    }
+  }
+  return backslash_bits;
+}
+
+NEEDS_BMI2_INTRINSICS 
+std::uint64_t get_lsb_indicator(const std::uint64_t* buffer,
+                                std::size_t count) {
+  std::uint64_t lsb_indicator = 0;
+  for (int i = 0; i < count; ++i) {
+    const std::uint64_t bits = _pext_u64((buffer[i] & lsb) << 7, msb);
+    lsb_indicator |= bits << (i * 8);
+  }
+  return lsb_indicator;
+}
+
+NEEDS_BMI2_INTRINSICS 
+std::uint64_t get_backslash_indicator(std::uint64_t* buffer,
+                                      std::size_t count,
+                                      std::uint64_t* backslashes_msb) {
+  std::uint64_t backslash_indicator = 0;
+  for (int i = 0; i < count; ++i) {
+    backslashes_msb[i] &= msb;
+    buffer[i] ^= (backslashes_msb[i] >> 7) * 0x73ull;
+    const std::uint64_t bits =
+        _pext_u64(backslashes_msb[i], 0x80'80'80'80'80'80'80'80ull);
+    backslash_indicator |= bits << (i * 8);
+  }
 }
 
 NEEDS_BMI2_INTRINSICS 
@@ -1000,41 +1049,16 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
             : ~((static_cast<std::uint64_t>(1) << (chunk_size)) - 1);
     const std::size_t words_used = (chunk_size / 8) + 1;
 
-    std::uint64_t slashdot_indicator = 0;
-    std::uint64_t backslashes_msb[8];
-    const std::uint64_t backslash = 0x0101010101010101ull * '\\';
-    std::uint64_t all_backslash = 0;
-    for (int i = 0; i < words_used; ++i) {
-      {
-        const std::uint64_t zero_if_equal =
-            (buffer[i] & mask) ^ all_dots;
-        const std::uint64_t corrected = (zero_if_equal - lsb) & ~zero_if_equal;
-        const std::uint64_t bits =
-            _pext_u64(corrected, 0x80'80'80'80'80'80'80'80ull);
-        slashdot_indicator |= bits << (i * 8);
-      }
+    std::uint64_t slashdot_indicator =
+        get_slashdot_indicator(buffer, words_used);
 
 #if NEED_BACKSLASH
-      {
-        const std::uint64_t zero_if_equal = buffer[i] ^ backslash;
-        backslashes_msb[i] = (zero_if_equal - lsb) & ~zero_if_equal;
-        all_backslash |= backslashes_msb[i];
-      }
-#endif
-    }
-
-#if NEED_BACKSLASH
-    // Convert backslashes if we have any
-    std::uint64_t backslash_bits = 0;
-    if (all_backslash & msb) {
-      for (int i = 0; i < words_used; ++i) {
-        backslashes_msb[i] &= msb;
-        buffer[i] ^= (backslashes_msb[i] >> 7) * 0x73ull;
-        const std::uint64_t bits =
-            _pext_u64(backslashes_msb[i], 0x80'80'80'80'80'80'80'80ull);
-        backslash_bits |= bits << (i * 8);
-      }
-      slashdot_indicator |= backslash_bits;
+    // TODO: Can we do this first, then not generate the indicator, then just
+    // generate it from moving get_slashdot_indicator afterwards?
+    const std::uint64_t backslash_indicator =
+        convert_backslashes(buffer, words_used);
+    slashdot_indicator |= backslash_indicator;
+    if (backslash_indicator) {
       std::memcpy(next - chunk_size, buffer, chunk_size);
     }
 #endif
@@ -1049,18 +1073,13 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     }
 #endif
 
-    std::uint64_t low_bit_set = 0;
-    for (int i = 0; i < words_used; ++i) {
-        const std::uint64_t bits =
-            _pext_u64((buffer[i] & lsb) << 7, 0x80'80'80'80'80'80'80'80ull);
-        low_bit_set |= bits << (i * 8);
-    }
-    const std::uint64_t forwardslash_bits = slashdot_indicator & low_bit_set;
-    const std::uint64_t dot_bits = slashdot_indicator & ~low_bit_set;
+    const std::uint64_t lsb_indicator = get_lsb_indicator(buffer, words_used);
+    const std::uint64_t forwardslash_bits = slashdot_indicator & lsb_indicator;
+    const std::uint64_t dot_bits = slashdot_indicator & ~lsb_indicator;
 
     const std::uint64_t slash_bits =
 #if NEED_BACKSLASH
-        backslash_bits |
+        backslash_indicator |
 #endif
         forwardslash_bits;
 
@@ -1075,7 +1094,7 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
       const std::uint64_t to_keep = ~to_remove;
       if (slash_count < 64) {
         output_slashes |=
-            _pext_u64(to_keep & backslash_bits, to_keep & slash_bits)
+            _pext_u64(to_keep & backslash_indicator, to_keep & slash_bits)
             << slash_count;
       }
       slash_count += popcnt64(to_keep & slash_bits);
