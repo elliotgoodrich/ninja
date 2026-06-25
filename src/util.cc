@@ -750,29 +750,31 @@ struct CountAndValue {
   bool value = false;
 };
 
+// Iterates over the runs of equal bits in a 64-bit value, yielding the
+// length and value of each run.  Only the first \a limit bits are considered,
+// which lets us stop at the real end of a partial final chunk instead of
+// walking into the synthetic padding bits.
 struct Biterator {
   std::uint64_t bits_;
-  unsigned total_ = 0;
+  unsigned limit_;
+  unsigned consumed_ = 0;
+  bool done_ = false;
   CountAndValue value_{};
 
-  explicit Biterator(std::uint64_t bits)
-      : bits_(bits) {
-    // Inspect the first bit once.
+  explicit Biterator(std::uint64_t bits, unsigned limit)
+      : bits_(bits), limit_(limit) {
+    // The value of the first run is simply the value of the first bit.
     value_.value = (bits_ & 1ull) != 0;
     read_next();
   }
 
   void read_next() {
-    assert(total_ != 64);
-    /*
-    if (total_ == 64) {
-      value_ = {};
+    if (consumed_ == limit_) {
+      done_ = true;
       return;
     }
-    */
 
-    const std::uint64_t remaining_bits = bits_ >> total_;
-    const unsigned bits_left = 64 - total_;
+    const std::uint64_t remaining_bits = bits_ >> consumed_;
 
     const std::uint64_t value_mask =
         0ull - static_cast<std::uint64_t>(value_.value);
@@ -782,35 +784,34 @@ struct Biterator {
     const bool found_changed_bit =
         bit_scan_forward64(&first_changed_bit, changed);
 
-    const unsigned count =
-        found_changed_bit
-            ? static_cast<unsigned>(first_changed_bit)
-            : bits_left;
+    unsigned count = found_changed_bit
+                         ? static_cast<unsigned>(first_changed_bit)
+                         : (64 - consumed_);
+
+    // Don't let a run extend past the requested limit (e.g. into the
+    // padding bits of the final, partial chunk).
+    if (count > limit_ - consumed_)
+      count = limit_ - consumed_;
 
     assert(count > 0);
-    assert(count <= bits_left);
-
-    value_.count = count;
-    total_ += count;
-    value_.value = !value_.value;
+    value_.count = static_cast<int>(count);
+    consumed_ += count;
   }
 
   Biterator& operator++() {
+    // The next run necessarily has the opposite value.
+    value_.value = !value_.value;
     read_next();
     return *this;
   }
 
-  CountAndValue operator*() const {
-    CountAndValue result = value_;
-    result.value = !result.value; // because read_next pre-flipped for next time
-    return result;
-  }
+  CountAndValue operator*() const { return value_; }
 };
 
 struct EndSentinel {};
 
 bool operator==(const Biterator& lhs, EndSentinel) {
-  return lhs.total_ == 64;
+  return lhs.done_;
 }
 
 bool operator!=(const Biterator& lhs, EndSentinel rhs) {
@@ -819,10 +820,10 @@ bool operator!=(const Biterator& lhs, EndSentinel rhs) {
 
 struct BitRange {
   std::uint64_t bits_;
-  unsigned long skip_start_;
-  BitRange(std::uint64_t bits) : bits_(bits), skip_start_(0) {}
+  unsigned limit_;
+  BitRange(std::uint64_t bits, unsigned limit) : bits_(bits), limit_(limit) {}
 
-  Biterator begin() { return Biterator(bits_); }
+  Biterator begin() { return Biterator(bits_, limit_); }
 
   EndSentinel end() { return EndSentinel(); }
 };
@@ -848,6 +849,7 @@ struct ChunkedReader {
     const std::size_t buffer_capacity = *buffer_size;
     if (remaining_ >= buffer_capacity) {
       std::memcpy(buffer, src_, buffer_capacity);
+      remaining_ -= buffer_capacity;
     } else {
       *buffer_size = remaining_;
       std::memcpy(buffer, src_, remaining_);
@@ -861,8 +863,13 @@ struct ChunkedReader {
           "\0\0\0\0\0\0\0\0"
           "\0\0\0\0\0\0\0\0"
           "\0\0\0\0\0\0";
-      std::memcpy(buffer + remaining_, padding,
-                  buffer_capacity - remaining_ - 1);
+      // Synthesize a trailing '/' at byte `remaining_` so the final component
+      // is terminated, and zero-fill the rest of the buffer so the high words
+      // (which get_*_indicator may still scan) contain no stray slash/dot
+      // bytes.  This must cover through buffer[63]; stopping a byte short would
+      // leave the synthesized slash missing whenever remaining_ == 63.
+      std::memcpy(buffer + remaining_, padding, buffer_capacity - remaining_);
+      remaining_ = 0;
       keep_going_ = false;
     }
     src_ += *buffer_size;
@@ -921,6 +928,66 @@ struct InPlaceStringModifier {
   /// position.
   void undo(std::size_t count) {
     out_ -= count;
+  }
+
+  /// Remove the last whole path component already written to the output,
+  /// together with the separator and any dangling "." characters that precede
+  /// it.  \a floor is the earliest writable position (just past any leading
+  /// root slash).  \a skip_dots is the number of trailing '.' bytes that
+  /// belong to the ".." being resolved but were emitted while processing an
+  /// earlier chunk (0, 1 or 2).  Used to resolve a ".." whose target directory
+  /// was written while processing an earlier chunk.  Returns:
+  ///   1  if a component was removed and output is still non-empty,
+  ///   0  if a component was removed and the output is now empty,
+  ///   -1 if nothing could be removed (output empty, or the directory the ".."
+  ///      refers to is itself ".." which cannot be collapsed).
+  int pop_component(char* floor, int skip_dots) {
+    // Step over the dangling dots of this "/../" that are at the output tail.
+    char* end = out_ - skip_dots;
+    if (end <= floor)
+      return -1;
+    // When the "/" that opens the "/../" lived in an earlier chunk it is now
+    // the trailing character of the output; step over it too.
+    if (IsPathSeparator(end[-1]))
+      --end;
+    char* p = end;
+    while (p > floor && !IsPathSeparator(p[-1]))
+      --p;
+    if (end - p == 2 && p[0] == '.' && p[1] == '.')
+      return -1;
+    // Drop the component, the dangling dots, and the separator before the
+    // component (if any), all at once.
+    out_ = (p > floor) ? p - 1 : floor;
+    return out_ > floor ? 1 : 0;
+  }
+
+  /// Remove the previous-chunk tail of a path component that spans the chunk
+  /// boundary (its head, \a head_len bytes long and all dots iff \a
+  /// head_all_dots, lives in the chunk currently being processed).  Unlike
+  /// pop_component this judges "is it a '..'?" against the *whole* component
+  /// (tail + head), since the tail alone can look like ".." while the full
+  /// component is longer (e.g. "...c" split as ".." + ".c").  Return values
+  /// match pop_component.
+  int pop_spanning_component(char* floor, bool head_all_dots, int head_len) {
+    char* end = out_;
+    if (end <= floor)
+      return -1;
+    char* p = end;
+    while (p > floor && !IsPathSeparator(p[-1]))
+      --p;
+    const std::ptrdiff_t tail_len = end - p;
+    if (tail_len + head_len == 2 && head_all_dots) {
+      bool tail_all_dots = true;
+      for (char* q = p; q < end; ++q)
+        if (*q != '.') {
+          tail_all_dots = false;
+          break;
+        }
+      if (tail_all_dots)
+        return -1;  // the spanning component is exactly ".."
+    }
+    out_ = (p > floor) ? p - 1 : floor;
+    return out_ > floor ? 1 : 0;
   }
 
   /// Return the current write position.
@@ -1006,9 +1073,10 @@ std::uint64_t get_backslash_indicator(std::uint64_t* buffer,
         _pext_u64(backslashes_msb[i], 0x80'80'80'80'80'80'80'80ull);
     backslash_indicator |= bits << (i * 8);
   }
+  return backslash_indicator;
 }
 
-NEEDS_BMI2_INTRINSICS 
+NEEDS_BMI2_INTRINSICS
 void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
 #define NEED_BACKSLASH 1
   const char* dst_start = path;
@@ -1040,6 +1108,14 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   InPlaceStringModifier writer(path, *len);
   ChunkedReader reader(path, *len);
 
+  // The earliest position the writer may rewind to when resolving a ".." that
+  // spans a chunk boundary: just past any leading root slash.
+  char* const writer_floor = path + (dst_start - path);
+
+  // A ".." in the first chunk can only ever cancel a component that lives
+  // within that same chunk, never previously-written output.
+  bool is_first_chunk = true;
+
   std::uint64_t buffer[8];
   std::size_t chunk_size = sizeof(buffer);
   while (char *next = reader.read(reinterpret_cast<char *>(&buffer), &chunk_size)) {
@@ -1047,7 +1123,12 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
         chunk_size == 64
             ? 0
             : ~((static_cast<std::uint64_t>(1) << (chunk_size)) - 1);
-    const std::size_t words_used = (chunk_size / 8) + 1;
+    // A partial chunk needs one extra word to cover the synthesized trailing
+    // padding slash at byte `chunk_size`; a full chunk uses all 8 words and
+    // has no padding byte.  Without the clamp this would be 9 for a full
+    // chunk and overrun the 8-word buffer.
+    const std::size_t words_used =
+        chunk_size == 64 ? 8 : (chunk_size / 8) + 1;
 
     std::uint64_t slashdot_indicator =
         get_slashdot_indicator(buffer, words_used);
@@ -1100,6 +1181,11 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
       slash_count += popcnt64(to_keep & slash_bits);
       previous_slashes = slash_bits;
       previous_dots = dot_bits;
+      is_first_chunk = false;
+      // Nothing in this chunk is removed, so keep every real byte.  This is
+      // essential to keep the writer's read cursor aligned with chunk
+      // boundaries for any following chunks.
+      writer.keep(chunk_size);
       continue;
     }
 #endif
@@ -1115,9 +1201,12 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
         ((dot_bits << 1u) | (previous_dots >> 63)) & slash_bits;
     const std::uint64_t current_path_to_remove =
         current_path_indicator | (current_path_indicator >> 1u);
-    if (current_path_indicator == 1) {
-      // In this case we have a "/./" that spans across 2 blocks and we need to
-      // remove the "." that is at the end of the last block
+    if (current_path_indicator & 1) {
+      // Bit 0 means a "/./" spans across two blocks: the "." sits at the end of
+      // the previous block (already written) and the closing "/" opens this
+      // block, so rewind the output over that trailing ".".  This is
+      // independent of any other "/./" found within this block (which is why we
+      // test bit 0 rather than the whole indicator being exactly 1).
       writer.undo(1);
     }
     to_remove |= current_path_to_remove;
@@ -1129,10 +1218,21 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
         ((dot_bits << 1u) | (previous_dots >> 63)) &
       slash_bits;
 
+    const auto bits_between = [](std::int8_t start, std::int8_t end) {
+      // end is one past the end
+      assert(start <= end);
+      assert(end <= 64);
+      // Guard the empty range: `ones >> (64 - end)` is undefined for end == 0.
+      if (start >= end)
+        return static_cast<std::uint64_t>(0);
+      const std::uint64_t ones = ~static_cast<std::uint64_t>(0);
+      return (ones << start) & (ones >> (64 - end));
+    };
+
     // For each parent path, find and mark the previous directory for removal
     std::uint64_t remaining_parent = parent_path_indicator;
     while (remaining_parent) {
-      const std::int8_t first_parent_path_indicator = [&] {
+      const std::int8_t first = [&] {
         unsigned long bit_pos;
         [[maybe_unused]] const bool okay =
             bit_scan_forward64(&bit_pos, remaining_parent);
@@ -1140,52 +1240,122 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
         return bit_pos;
       }();
 
-      // Trying to find the previous slash to the "../" parent
-      // path, ignoring slashes that have already been removed
+      // Slashes in this chunk before the "../" closing slash, ignoring any
+      // already removed or made immutable.
       const std::uint64_t before_mask =
-          (static_cast<std::uint64_t>(1) << first_parent_path_indicator) - 1;
+          (static_cast<std::uint64_t>(1) << first) - 1;
       const std::uint64_t to_consider =
           before_mask & slash_bits & ~to_remove & mutable_chars;
-      // Only if there are slashes to consider can we attempt to remove
-      // the previous directory.  Otherwise we keep the "../"
-      if (!to_consider) {
-        const std::uint64_t immutable = (static_cast<std::uint64_t>(0b111)
-                                         << (first_parent_path_indicator - 2));
-        const std::uint64_t mask = immutable & ~to_remove;
-        mutable_chars &= ~mask;
-      } else {
-        const std::int8_t prev_slash1 = [&] {
-          unsigned long bit_pos;
-          [[maybe_unused]] const bool okay = bit_scan_reverse64(&bit_pos, to_consider);
-          assert(okay);
-          return bit_pos;
-        }();
 
-        const std::uint64_t before_mask2 =
-            (static_cast<std::uint64_t>(1) << prev_slash1) - 1;
-
-        const auto bits_between = [](std::int8_t start, std::int8_t end) {
-          // end is one past the end
-          assert(start <= end);
-          assert(end <= 64);
-          const std::uint64_t ones = ~static_cast<std::uint64_t>(0);
-          return (ones << start) & (ones >> (64 - end));
-        };
-
-        bool found;
-        const std::int8_t prev_slash2 = [&] {
-          unsigned long bit_pos;
-          // Here we may not find a slash if it's the start of the path
-          found = bit_scan_reverse64(&bit_pos, to_consider & before_mask2);
-          return found ? bit_pos : 0;
-        }();
-
-        const std::uint64_t dots_and_prev_directory_to_remove =
-            bits_between(prev_slash2, first_parent_path_indicator + !found);
-        to_remove |= dots_and_prev_directory_to_remove;
+      // Locate the separator that precedes the directory the ".." cancels.
+      // If it lies within this chunk we can resolve the whole thing locally.
+      bool prev_in_chunk = false;
+      std::int8_t prev_slash2 = 0;
+      if (to_consider) {
+        unsigned long opening_slash;  // the '/' that opens this "/../"
+        bit_scan_reverse64(&opening_slash, to_consider);
+        const std::uint64_t before_opening =
+            (static_cast<std::uint64_t>(1) << opening_slash) - 1;
+        unsigned long bit_pos;
+        if (bit_scan_reverse64(&bit_pos, to_consider & before_opening)) {
+          prev_in_chunk = true;
+          prev_slash2 = static_cast<std::int8_t>(bit_pos);
+        }
       }
-      remaining_parent &=
-          ~(static_cast<std::uint64_t>(1) << first_parent_path_indicator);
+
+      // Keep the "../" as an un-collapsible leading parent reference, marking
+      // its bytes immutable so a later "../" in this chunk cannot remove it.
+      // (The shift is guarded for a closing slash at bit 0 or 1, where the
+      // component spans the previous chunk.)
+      const auto keep_dot_dot = [&] {
+        const std::uint64_t immutable =
+            first >= 2 ? (static_cast<std::uint64_t>(0b111) << (first - 2))
+                       : (static_cast<std::uint64_t>(0b111) >> (2 - first));
+        mutable_chars &= ~(immutable & ~to_remove);
+      };
+
+      if (prev_in_chunk) {
+        // The directory to remove is wholly within this chunk: drop
+        // "<sep>dir/.." and keep the closing slash as the new separator.
+        to_remove |= bits_between(prev_slash2, first);
+      } else if (is_first_chunk) {
+        // No separator precedes the directory within this chunk and there is
+        // no earlier output: either the directory is this chunk's (and the
+        // path's) first component, or there is nothing to back up over.
+        if (to_consider)
+          to_remove |= bits_between(0, first + 1);
+        else
+          keep_dot_dot();
+      } else {
+        // No MUTABLE separator precedes the directory within this chunk.  We
+        // must decide whether the directory the ".." cancels lives in this
+        // chunk (its separators were consumed by an earlier ".." in the same
+        // chunk, e.g. "x/y/z/../../.."), spans the chunk boundary, or was
+        // emitted entirely while processing an earlier chunk.  Find the "/../"
+        // opening slash even if it has been made immutable so we can inspect
+        // what precedes it.
+        const std::uint64_t seps_before =
+            before_mask & slash_bits & ~to_remove;
+        std::uint64_t surviving = 0;
+        bool dir_reaches_chunk_start = true;
+        if (seps_before) {
+          unsigned long opening;
+          bit_scan_reverse64(&opening, seps_before);
+          surviving = bits_between(0, static_cast<std::int8_t>(opening)) &
+                      ~to_remove;
+          // Is there a separator before the directory within this chunk (even
+          // an immutable one)?  If so the directory starts inside this chunk.
+          const std::uint64_t before_opening =
+              (static_cast<std::uint64_t>(1) << opening) - 1;
+          dir_reaches_chunk_start = (seps_before & before_opening) == 0;
+        }
+        // The previous chunk's output continues this directory when its final
+        // byte is not a separator (so it belongs to the same component).  A
+        // trailing kept leading ".." is handled safely by pop_component, which
+        // refuses to collapse a "..".  If a spanning "/./" was just collapsed
+        // (current_path_indicator bit 0) the trailing "." was undone, exposing
+        // the '/' before it, so the previous output now ends in a separator.
+        const bool prev_continues =
+            (previous_slashes >> 63) == 0 && !(current_path_indicator & 1);
+
+        if ((surviving & mutable_chars) && dir_reaches_chunk_start &&
+            prev_continues) {
+          // The directory spans the boundary: its tail was emitted with an
+          // earlier chunk and its head is in this chunk.  Rewind the output
+          // over the tail and remove the head, keeping the "/../" closing slash
+          // as the new separator.
+          const int head_len = static_cast<int>(popcnt64(surviving));
+          const bool head_all_dots = (surviving & ~dot_bits) == 0;
+          const int popped =
+              writer.pop_spanning_component(writer_floor, head_all_dots, head_len);
+          if (popped >= 0)
+            to_remove |= bits_between(0, first + (popped == 0 ? 1 : 0));
+          else
+            keep_dot_dot();
+        } else if (surviving & mutable_chars) {
+          // A real directory survives wholly within this chunk: cancel it by
+          // removing everything up to and including the "..", relying on
+          // mutable_chars to protect any genuinely-leading bytes.
+          to_remove |= bits_between(0, first + 1);
+        } else if (surviving) {
+          // Only immutable (leading "..") content precedes: this ".." is itself
+          // a leading parent reference that cannot be collapsed.
+          keep_dot_dot();
+        } else {
+          // The directory was written while processing an earlier chunk; rewind
+          // the output over it.  When the closing slash is at bit 0 or 1 the
+          // ".." dots themselves spilled into the previous chunk's output and
+          // must be stepped over as well.
+          const int skip_dots = first >= 2 ? 0 : (2 - first);
+          const int popped = writer.pop_component(writer_floor, skip_dots);
+          if (popped >= 0)
+            to_remove |= bits_between(0, first + (popped == 0 ? 1 : 0));
+          else
+            keep_dot_dot();
+        }
+      }
+
+      remaining_parent &= ~(static_cast<std::uint64_t>(1) << first);
     }
 
     const std::uint64_t to_keep = ~to_remove;
@@ -1194,14 +1364,15 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
 #if NEED_BACKSLASH
     if (slash_count < 64) {
       output_slashes |=
-          _pext_u64(to_keep & backslash_bits, to_keep & slash_bits)
+          _pext_u64(to_keep & backslash_indicator, to_keep & slash_bits)
           << slash_count;
     }
     slash_count += popcnt64(to_keep & slash_bits);
 #endif
 
     // Finally, copy or skip all the values we need to in the buffer.
-    for (const CountAndValue& v : BitRange(mutable_chars & to_remove)) {
+    for (const CountAndValue& v :
+         BitRange(mutable_chars & to_remove, static_cast<unsigned>(chunk_size))) {
       if (v.value)
         writer.remove(v.count);
       else
@@ -1211,6 +1382,7 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     previous_slashes = slash_bits;
     previous_dots = dot_bits;
     mutable_chars = ~static_cast<std::uint64_t>(0);
+    is_first_chunk = false;
   }
 
   // Flush any remaining pending copy region.
