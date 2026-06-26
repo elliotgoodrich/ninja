@@ -941,23 +941,29 @@ struct InPlaceStringModifier {
   ///   0  if a component was removed and the output is now empty,
   ///   -1 if nothing could be removed (output empty, or the directory the ".."
   ///      refers to is itself ".." which cannot be collapsed).
-  int pop_component(char* floor, int skip_dots) {
+  int pop_component(char* floor, int skip_dots, int* removed_prior_slash) {
+    *removed_prior_slash = 0;
     // Step over the dangling dots of this "/../" that are at the output tail.
     char* end = out_ - skip_dots;
     if (end <= floor)
       return -1;
     // When the "/" that opens the "/../" lived in an earlier chunk it is now
-    // the trailing character of the output; step over it too.
-    if (IsPathSeparator(end[-1]))
+    // the trailing character of the output; step over it too.  That slash was
+    // already counted into output_slashes, so tell the caller to un-count it.
+    if (IsPathSeparator(end[-1])) {
       --end;
+      *removed_prior_slash = 1;
+    }
     char* p = end;
     while (p > floor && !IsPathSeparator(p[-1]))
       --p;
     if (end - p == 2 && p[0] == '.' && p[1] == '.')
       return -1;
-    // Drop the component, the dangling dots, and the separator before the
-    // component (if any), all at once.
-    out_ = (p > floor) ? p - 1 : floor;
+    // Drop the component and the dangling dots, but keep the separator that
+    // precedes the component (it becomes the separator before whatever follows
+    // the "/.."), matching the scalar CanonicalizePath which retains the left
+    // separator.  p[-1] is that separator when p > floor.
+    out_ = p;
     return out_ > floor ? 1 : 0;
   }
 
@@ -986,7 +992,8 @@ struct InPlaceStringModifier {
       if (tail_all_dots)
         return -1;  // the spanning component is exactly ".."
     }
-    out_ = (p > floor) ? p - 1 : floor;
+    // Keep the separator preceding the component (see pop_component).
+    out_ = p;
     return out_ > floor ? 1 : 0;
   }
 
@@ -1276,8 +1283,10 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
 
       if (prev_in_chunk) {
         // The directory to remove is wholly within this chunk: drop
-        // "<sep>dir/.." and keep the closing slash as the new separator.
-        to_remove |= bits_between(prev_slash2, first);
+        // "dir/.." plus the closing slash, keeping the *preceding* separator
+        // (prev_slash2) as the separator for whatever follows.  Retaining the
+        // left separator matches the scalar CanonicalizePath.
+        to_remove |= bits_between(prev_slash2 + 1, first + 1);
       } else if (is_first_chunk) {
         // No separator precedes the directory within this chunk and there is
         // no earlier output: either the directory is this chunk's (and the
@@ -1321,15 +1330,15 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
         if ((surviving & mutable_chars) && dir_reaches_chunk_start &&
             prev_continues) {
           // The directory spans the boundary: its tail was emitted with an
-          // earlier chunk and its head is in this chunk.  Rewind the output
-          // over the tail and remove the head, keeping the "/../" closing slash
-          // as the new separator.
+          // earlier chunk and its head is in this chunk.  pop_spanning_component
+          // rewinds over the tail while keeping the separator that precedes it,
+          // so we remove this chunk's head together with the whole "/../".
           const int head_len = static_cast<int>(popcnt64(surviving));
           const bool head_all_dots = (surviving & ~dot_bits) == 0;
           const int popped =
               writer.pop_spanning_component(writer_floor, head_all_dots, head_len);
           if (popped >= 0)
-            to_remove |= bits_between(0, first + (popped == 0 ? 1 : 0));
+            to_remove |= bits_between(0, first + 1);
           else
             keep_dot_dot();
         } else if (surviving & mutable_chars) {
@@ -1347,18 +1356,36 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
           // ".." dots themselves spilled into the previous chunk's output and
           // must be stepped over as well.
           const int skip_dots = first >= 2 ? 0 : (2 - first);
-          const int popped = writer.pop_component(writer_floor, skip_dots);
-          if (popped >= 0)
-            to_remove |= bits_between(0, first + (popped == 0 ? 1 : 0));
-          else
+          int removed_prior_slash = 0;
+          const int popped =
+              writer.pop_component(writer_floor, skip_dots, &removed_prior_slash);
+          if (popped >= 0) {
+            // If the pop removed the "/../" opening slash that lived in an
+            // earlier chunk, drop its (top) bit from output_slashes -- it was
+            // counted when that chunk was processed but is no longer in the
+            // output.
+            if (removed_prior_slash && slash_count > 0) {
+              --slash_count;
+              if (slash_count < 64)
+                output_slashes &= ~(static_cast<std::uint64_t>(1) << slash_count);
+            }
+            to_remove |= bits_between(0, first + 1);
+          } else {
             keep_dot_dot();
+          }
         }
       }
 
       remaining_parent &= ~(static_cast<std::uint64_t>(1) << first);
     }
 
-    const std::uint64_t to_keep = ~to_remove;
+    // slash_bits must reflect exactly the slashes the writer keeps.  The writer
+    // drops only `mutable_chars & to_remove` (see the BitRange loop below), so
+    // an immutable byte that was flagged for removal -- notably the leading
+    // root slash, which previous_slashes' bit-63 seed marks as a faux empty
+    // path -- is still emitted and must be counted here.  Using plain
+    // ~to_remove would omit it and shift every later slash's bit down.
+    const std::uint64_t to_keep = ~(mutable_chars & to_remove);
 
     // Calculate slash_bits
 #if NEED_BACKSLASH
@@ -1387,11 +1414,17 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
 
   // Flush any remaining pending copy region.
   char *dst = writer.flush();
-  
+
   // Remove trailing path separator if any, but keep the initial
   // path separator(s) if there was one (or two on Windows).
-  if (dst > dst_start && IsPathSeparator(dst[-1]))
+  if (dst > dst_start && IsPathSeparator(dst[-1])) {
     dst--;
+    // That separator was the last slash counted into output_slashes (highest
+    // bit), but it is not part of the final path, so drop its bit to match a
+    // fresh scan of the output.  Slashes past bit 63 were never recorded.
+    if (slash_count >= 1 && slash_count <= 64)
+      output_slashes &= ~(static_cast<std::uint64_t>(1) << (slash_count - 1));
+  }
 
   if (dst == path) {
     // Handle special cases like "aa/.." -> "."

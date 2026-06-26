@@ -352,6 +352,42 @@ TEST(CanonicalizePath, LongStringTest) {
   }
 }
 
+// CanonicalizePath2 (the SWAR implementation) must be a drop-in replacement for
+// the scalar CanonicalizePath: byte-for-byte identical output AND identical
+// slash_bits.  Fuzz random paths built from separators and dots at lengths that
+// straddle the 64-byte SWAR chunk boundaries -- that is where the two
+// implementations historically diverged (cross-boundary "..", "/./", trailing
+// "/.", leading-separator and trailing-trimmed slash bookkeeping).
+TEST(CanonicalizePath, DifferentialAgainstReference) {
+  const char alphabet[] = { 'a', 'b', '/', '.', '\\' };
+  // Deterministic xorshift64 PRNG so failures are reproducible.
+  uint64_t state = 0x9E3779B97F4A7C15ull;
+  auto next = [&state]() {
+    state ^= state << 13;
+    state ^= state >> 7;
+    state ^= state << 17;
+    return state;
+  };
+  const int lengths[] = { 1,   2,   3,   8,   31,  55,  60,  61,  62,  63,
+                          64,  65,  66,  67,  70,  80,  100, 126, 127, 128,
+                          129, 130, 190, 191, 192, 193, 200, 255, 256, 257 };
+  for (size_t li = 0; li < sizeof(lengths) / sizeof(lengths[0]); ++li) {
+    const int len = lengths[li];
+    for (int iter = 0; iter < 2000; ++iter) {
+      string in;
+      in.reserve(len);
+      for (int k = 0; k < len; ++k)
+        in += alphabet[next() % sizeof(alphabet)];
+      string ref = in, swar = in;
+      uint64_t ref_bits = 0, swar_bits = 0;
+      CanonicalizePath(&ref, &ref_bits);
+      CanonicalizePath2(&swar, &swar_bits);
+      ASSERT_EQ(ref, swar) << "input=[" << in << "]";
+      ASSERT_EQ(ref_bits, swar_bits) << "input=[" << in << "] out=[" << ref << "]";
+    }
+  }
+}
+
 TEST(CanonicalizePath, SlashTracking) {
   string path;
   uint64_t slash_bits;
