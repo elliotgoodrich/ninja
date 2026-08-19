@@ -216,6 +216,11 @@ static bool IsPathSeparator(char c) {
 #endif
 }
 
+static void CanonicalizePathFrom(char* path, size_t* len,
+                                 uint64_t* slash_bits, const char* src,
+                                 char* dst, char* dst_start, char* dst0,
+                                 bool partial_first);
+
 void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
   // WARNING: this function is performance-critical; please benchmark
   // any changes you make to it.
@@ -223,12 +228,10 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
     return;
   }
 
-  char* start = path;
-  char* dst = start;
+  char* dst = path;
   char* dst_start = dst;
-  const char* src = start;
-  const char* end = start + *len;
-  const char* src_next;
+  const char* src = path;
+  const char* end = path + *len;
 
   // For absolute paths, skip the leading directory separator
   // as this one should never be removed from the result.
@@ -258,10 +261,25 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
     }
   }
 
+  CanonicalizePathFrom(path, len, slash_bits, src, dst, dst_start, dst, false);
+}
+
+/// Canonicalize the tail of \a path beginning at \a src into the output
+/// already built up in [path, dst).  \a dst_start is the earliest byte the
+/// trailing separator trim may remove, \a dst0 the earliest a ".." may back
+/// up to, and \a component_count how many whole components the output holds
+/// (a ".." can only cancel one of those).  \a partial_first says the bytes at
+/// \a src continue a component that began earlier, so that first component
+/// must not be read as "", "." or "..".
+static void CanonicalizePathFrom(char* path, size_t* len, uint64_t* slash_bits,
+                                 const char* src, char* dst, char* dst_start,
+                                 char* dst0, bool partial_first) {
+  char* start = path;
+  const char* end = start + *len;
+  const char* src_next;
+
   // Loop over all components of the paths _except_ the last one, in
   // order to simplify the loop's code and make it faster.
-  int component_count = 0;
-  char* dst0 = dst;
   for (; src < end; src = src_next) {
 #ifndef _WIN32
     // Use memchr() for faster lookups thanks to optimized C library
@@ -289,7 +307,12 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
     // Length of the component, excluding trailing directory.
     size_t component_len = next_sep - src;
 
-    if (component_len <= 2) {
+    // A component that began before src is only the tail of a name, so it
+    // must be copied rather than read as "", "." or "..".
+    const bool whole_component = !partial_first;
+    partial_first = false;
+
+    if (whole_component && component_len <= 2) {
       if (component_len == 0) {
         continue;  // Ignore empty component, e.g. 'foo//bar' -> 'foo/bar'.
       }
@@ -298,9 +321,10 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
           continue;  // Ignore '.' component, e.g. './foo' -> 'foo'.
         } else if (src[1] == '.') {
           // Process the '..' component if found. Back up if possible.
-          if (component_count > 0) {
+          // Output past dst0 is exactly the components a ".." may cancel, so
+          // it stands in for a count of them.
+          if (dst > dst0) {
             // Move back to start of previous component.
-            --component_count;
             while (--dst > dst0 && !IsPathSeparator(dst[-1])) {
               // nothing to do here, decrement happens before condition check.
             }
@@ -309,13 +333,14 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
             dst[1] = '.';
             dst[2] = src[2];
             dst += 3;
+            // A leading ".." cannot be cancelled by a later one, so it joins
+            // the part of the output that is off limits.
+            dst0 = dst;
           }
           continue;
         }
       }
     }
-    ++component_count;
-
     // Copy or skip component, including trailing directory separator.
     if (dst != src) {
       ::memmove(dst, src, src_next - src);
@@ -330,12 +355,12 @@ void CanonicalizePath(char* path, size_t* len, uint64_t* slash_bits) {
   do {
     if (component_len == 0)
       break;  // Ignore empty component (e.g. 'foo//' -> 'foo/')
-    if (src[0] == '.') {
+    if (!partial_first && src[0] == '.') {
       if (component_len == 1)
         break;  // Ignore trailing '.' (e.g. 'foo/.' -> 'foo/')
       if (component_len == 2 && src[1] == '.') {
         // Handle '..'. Back up if possible.
-        if (component_count > 0) {
+        if (dst > dst0) {
           while (--dst > dst0 && !IsPathSeparator(dst[-1])) {
             // nothing to do here, decrement happens before condition check.
           }
@@ -398,6 +423,15 @@ void CanonicalizePathFast(string* path, uint64_t* slash_bits) {
 
 
 
+/// Resume the scalar implementation partway through a path, for the same
+/// reason and with the same out-of-line requirement as the fallback below.
+static NINJA_NOINLINE void CanonicalizePathResume(
+    char* path, std::size_t* len, std::uint64_t* slash_bits, const char* src,
+    char* dst, char* dst_start, char* dst0, bool partial_first) {
+  CanonicalizePathFrom(path, len, slash_bits, src, dst, dst_start, dst0,
+                       partial_first);
+}
+
 /// Hand a path the scan cannot finish to the scalar implementation.  It must
 /// stay out of line: inlined into CanonicalizePathFast it bloats the scan loop
 /// that every already-canonical path runs to completion.
@@ -458,6 +492,7 @@ void CanonicalizePathFast(char* path, std::size_t* len, std::uint64_t* slash_bit
     const char* p = src;
     std::size_t remaining = end - p;
     bool canonical = true;
+
     for (;;) {
       if (remaining == 0)
         break;
@@ -482,7 +517,21 @@ void CanonicalizePathFast(char* path, std::size_t* len, std::uint64_t* slash_bit
             slash_or_dot ^ separators_of(w, slash_or_dot);
         if ((dots & (dots << 8)) ||
             (carry != 0 && p[-1] == '.' && (dots & 0x80) != 0)) {
-          CanonicalizePathFallback(path, len, slash_bit);
+          if (p == path) {
+            CanonicalizePathFallback(path, len, slash_bit);
+            return;
+          }
+          // Nothing has been written, so the output so far is the input, and
+          // the scalar can pick up right here.  It only ever backs a ".." up
+          // to dst0, which is past the leading separator and any leading
+          // "../", and the leading separator itself was counted by the loop
+          // above without belonging to a component.
+          char* const dst_start = IsPathSeparator(path[0]) ? path + 1 : path;
+          char* dst0 = const_cast<char*>(src);
+          if (dst0 < dst_start)
+            dst0 = dst_start;
+          CanonicalizePathResume(path, len, slash_bit, p, const_cast<char*>(p),
+                                 dst_start, dst0, !IsPathSeparator(p[-1]));
           return;
         }
 #endif
