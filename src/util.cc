@@ -1205,6 +1205,20 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
 #endif
 
       if (slashdot & ((slashdot << 8) | carry)) {
+#ifndef _WIN32
+        // Adjacent dots may be a "..", which only the general implementation
+        // resolves.  Recognising that here, on a branch no canonical path
+        // ever takes, saves such a path a wasted trip through the removal
+        // loop below.  A pair spanning the word boundary is checked against
+        // the source byte directly; carry is only set once one exists.
+        const std::uint64_t dots =
+            slash_or_dot ^ separators_of(w, slash_or_dot);
+        if ((dots & (dots << 8)) ||
+            (carry != 0 && p[-1] == '.' && (dots & 0x80) != 0)) {
+          CanonicalizePath2Slow(path, len, slash_bit);
+          return;
+        }
+#endif
         from = static_cast<std::size_t>(p - path);
         canonical = false;
         break;
