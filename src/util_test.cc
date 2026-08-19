@@ -22,7 +22,7 @@ namespace {
 
 void CanonicalizePath(string* path) {
   uint64_t unused;
-  ::CanonicalizePath2(path, &unused);
+  ::CanonicalizePathFast(path, &unused);
 }
 
 }  // namespace
@@ -287,7 +287,7 @@ TEST(CanonicalizePath, LongStringTest) {
     expected = path;
     path += "/b/c/.";
     expected += "/b/c";
-    CanonicalizePath2(&path, &slash_bits);
+    CanonicalizePathFast(&path, &slash_bits);
     EXPECT_EQ(path, expected);
     EXPECT_EQ(0, slash_bits);
   }
@@ -296,7 +296,7 @@ TEST(CanonicalizePath, LongStringTest) {
     path.assign(i, 'a');
     path += ".h";
     expected = path;
-    CanonicalizePath2(&path, &slash_bits);
+    CanonicalizePathFast(&path, &slash_bits);
     EXPECT_EQ(path, expected);
     EXPECT_EQ(0, slash_bits);
   }
@@ -305,7 +305,7 @@ TEST(CanonicalizePath, LongStringTest) {
     path.assign(i, 'a');
     path += "/b/c.h";
     expected = path;
-    CanonicalizePath2(&path, &slash_bits);
+    CanonicalizePathFast(&path, &slash_bits);
     EXPECT_EQ(path, expected);
     EXPECT_EQ(0, slash_bits);
   }
@@ -315,7 +315,7 @@ TEST(CanonicalizePath, LongStringTest) {
     expected = path;
     path += "//c.h";
     expected += "/c.h";
-    CanonicalizePath2(&path, &slash_bits);
+    CanonicalizePathFast(&path, &slash_bits);
     EXPECT_EQ(path, expected) << "i=" << i;
     EXPECT_EQ(0, slash_bits);
   }
@@ -325,7 +325,7 @@ TEST(CanonicalizePath, LongStringTest) {
     expected = path;
     path += "/b/./c.h";
     expected += "/b/c.h";
-    CanonicalizePath2(&path, &slash_bits);
+    CanonicalizePathFast(&path, &slash_bits);
     EXPECT_EQ(path, expected) << "i=" << i;
     EXPECT_EQ(0, slash_bits);
   }
@@ -335,7 +335,7 @@ TEST(CanonicalizePath, LongStringTest) {
     expected = path;
     path += "/x/y/z/../../../c.h";
     expected += "/c.h";
-    CanonicalizePath2(&path, &slash_bits);
+    CanonicalizePathFast(&path, &slash_bits);
     EXPECT_EQ(path, expected) << "i=" << i;
     EXPECT_EQ(0, slash_bits);
   }
@@ -348,13 +348,13 @@ TEST(CanonicalizePath, LongStringTest) {
     expected = path;
     path += "path/../a.h";
     expected += "a.h";
-    CanonicalizePath2(&path, &slash_bits);
+    CanonicalizePathFast(&path, &slash_bits);
     EXPECT_EQ(path, expected) << "i=" << i;
     EXPECT_EQ(0, slash_bits);
   }
 }
 
-// CanonicalizePath2 (the SWAR implementation) must be a drop-in replacement for
+// CanonicalizePathFast (the SWAR implementation) must be a drop-in replacement for
 // the scalar CanonicalizePath: byte-for-byte identical output AND identical
 // slash_bits.  Fuzz random paths built from separators and dots at lengths that
 // straddle the 64-byte SWAR chunk boundaries -- that is where the two
@@ -383,7 +383,7 @@ TEST(CanonicalizePath, DifferentialAgainstReference) {
       string ref = in, swar = in;
       uint64_t ref_bits = 0, swar_bits = 0;
       CanonicalizePath(&ref, &ref_bits);
-      CanonicalizePath2(&swar, &swar_bits);
+      CanonicalizePathFast(&swar, &swar_bits);
       ASSERT_EQ(ref, swar) << "input=[" << in << "]";
       ASSERT_EQ(ref_bits, swar_bits) << "input=[" << in << "] out=[" << ref << "]";
     }
@@ -395,82 +395,82 @@ TEST(CanonicalizePath, SlashTracking) {
   uint64_t slash_bits;
 
   path = "foo.h";
-  CanonicalizePath2(&path, &slash_bits);
+  CanonicalizePathFast(&path, &slash_bits);
   EXPECT_EQ("foo.h", path);
   EXPECT_EQ(0, slash_bits);
 
   path = "a\\foo.h";
-  CanonicalizePath2(&path, &slash_bits);
+  CanonicalizePathFast(&path, &slash_bits);
   EXPECT_EQ("a/foo.h", path);
   EXPECT_EQ(1, slash_bits);
 
   path = "a/bcd/efh\\foo.h";
-  CanonicalizePath2(&path, &slash_bits);
+  CanonicalizePathFast(&path, &slash_bits);
   EXPECT_EQ("a/bcd/efh/foo.h", path);
   EXPECT_EQ(4, slash_bits);
 
   path = "a\\bcd/efh\\foo.h";
-  CanonicalizePath2(&path, &slash_bits);
+  CanonicalizePathFast(&path, &slash_bits);
   EXPECT_EQ("a/bcd/efh/foo.h", path);
   EXPECT_EQ(5, slash_bits);
 
   path = "a\\bcd\\efh\\foo.h";
-  CanonicalizePath2(&path, &slash_bits);
+  CanonicalizePathFast(&path, &slash_bits);
   EXPECT_EQ("a/bcd/efh/foo.h", path);
   EXPECT_EQ(7, slash_bits);
 
   path = "a/bcd/efh/foo.h";
-  CanonicalizePath2(&path, &slash_bits);
+  CanonicalizePathFast(&path, &slash_bits);
   EXPECT_EQ("a/bcd/efh/foo.h", path);
   EXPECT_EQ(0, slash_bits);
 
   path = "a\\./efh\\foo.h";
-  CanonicalizePath2(&path, &slash_bits);
+  CanonicalizePathFast(&path, &slash_bits);
   EXPECT_EQ("a/efh/foo.h", path);
   EXPECT_EQ(3, slash_bits);
 
   path = "a\\../efh\\foo.h";
-  CanonicalizePath2(&path, &slash_bits);
+  CanonicalizePathFast(&path, &slash_bits);
   EXPECT_EQ("efh/foo.h", path);
   EXPECT_EQ(1, slash_bits);
 
   path = "a\\b\\c\\d\\e\\f\\g\\foo.h";
-  CanonicalizePath2(&path, &slash_bits);
+  CanonicalizePathFast(&path, &slash_bits);
   EXPECT_EQ("a/b/c/d/e/f/g/foo.h", path);
   EXPECT_EQ(127, slash_bits);
 
   path = "a\\b\\c\\..\\..\\..\\g\\foo.h";
-  CanonicalizePath2(&path, &slash_bits);
+  CanonicalizePathFast(&path, &slash_bits);
   EXPECT_EQ("g/foo.h", path);
   EXPECT_EQ(1, slash_bits);
 
   path = "a\\b/c\\../../..\\g\\foo.h";
-  CanonicalizePath2(&path, &slash_bits);
+  CanonicalizePathFast(&path, &slash_bits);
   EXPECT_EQ("g/foo.h", path);
   EXPECT_EQ(1, slash_bits);
 
   path = "a\\b/c\\./../..\\g\\foo.h";
-  CanonicalizePath2(&path, &slash_bits);
+  CanonicalizePathFast(&path, &slash_bits);
   EXPECT_EQ("a/g/foo.h", path);
   EXPECT_EQ(3, slash_bits);
 
   path = "a\\b/c\\./../..\\g/foo.h";
-  CanonicalizePath2(&path, &slash_bits);
+  CanonicalizePathFast(&path, &slash_bits);
   EXPECT_EQ("a/g/foo.h", path);
   EXPECT_EQ(1, slash_bits);
 
   path = "a\\\\\\foo.h";
-  CanonicalizePath2(&path, &slash_bits);
+  CanonicalizePathFast(&path, &slash_bits);
   EXPECT_EQ("a/foo.h", path);
   EXPECT_EQ(1, slash_bits);
 
   path = "a/\\\\foo.h";
-  CanonicalizePath2(&path, &slash_bits);
+  CanonicalizePathFast(&path, &slash_bits);
   EXPECT_EQ("a/foo.h", path);
   EXPECT_EQ(0, slash_bits);
 
   path = "a\\//foo.h";
-  CanonicalizePath2(&path, &slash_bits);
+  CanonicalizePathFast(&path, &slash_bits);
   EXPECT_EQ("a/foo.h", path);
   EXPECT_EQ(1, slash_bits);
 }
@@ -610,7 +610,7 @@ TEST(CanonicalizePath, DifferentialAgainstReferencePosix) {
       string ref = in, swar = in;
       uint64_t ref_bits = 0, swar_bits = 0;
       CanonicalizePath(&ref, &ref_bits);
-      CanonicalizePath2(&swar, &swar_bits);
+      CanonicalizePathFast(&swar, &swar_bits);
       ASSERT_EQ(ref, swar) << "input=[" << in << "]";
       ASSERT_EQ(ref_bits, swar_bits) << "input=[" << in << "] out=[" << ref << "]";
     }
@@ -630,7 +630,7 @@ TEST(CanonicalizePath, BoundarySpanningParent) {
     path.assign(i, 'a');
     expected = path + "/c";
     path += "/bbbbbbbbbbbbbbbbbbbb/../c";
-    CanonicalizePath2(&path, &slash_bits);
+    CanonicalizePathFast(&path, &slash_bits);
     EXPECT_EQ(expected, path) << "i=" << i;
     EXPECT_EQ(0u, slash_bits);
   }
@@ -640,7 +640,7 @@ TEST(CanonicalizePath, BoundarySpanningParent) {
     path.assign(i, 'a');
     expected = path;
     path += "/bbbbbbbbbb/cccccccccc/dddddddddd/../../..";
-    CanonicalizePath2(&path, &slash_bits);
+    CanonicalizePathFast(&path, &slash_bits);
     EXPECT_EQ(expected, path) << "i=" << i;
     EXPECT_EQ(0u, slash_bits);
   }
@@ -656,7 +656,7 @@ TEST(CanonicalizePath, PopToEmptyAtBoundary) {
   for (int i = 1; i < 140; ++i) {
     path.assign(i, 'a');
     path += "/../x/../y";
-    CanonicalizePath2(&path, &slash_bits);
+    CanonicalizePathFast(&path, &slash_bits);
     EXPECT_EQ("y", path) << "i=" << i;
     EXPECT_EQ(0u, slash_bits);
   }

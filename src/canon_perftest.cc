@@ -96,19 +96,9 @@ static bool IsPathSeparator(char c) {
 #endif
 }
 
-void disambiguation4(char* path, std::size_t* len, std::uint64_t* slash_bits) {
+void disambiguationFast(char* path, std::size_t* len, std::uint64_t* slash_bits) {
   // Disambiguate between overloads of CanonicalizePath
-  CanonicalizePath4(path, len, slash_bits);
-}
-
-void disambiguation3(char* path, std::size_t* len, std::uint64_t* slash_bits) {
-  // Disambiguate between overloads of CanonicalizePath
-  CanonicalizePath3(path, len, slash_bits);
-}
-
-void disambiguation2(char* path, std::size_t* len, std::uint64_t* slash_bits) {
-  // Disambiguate between overloads of CanonicalizePath
-  CanonicalizePath2(path, len, slash_bits);
+  CanonicalizePathFast(path, len, slash_bits);
 }
 
 void disambiguation(char* path, std::size_t* len, std::uint64_t* slash_bits) {
@@ -387,11 +377,8 @@ int main() {
 
   std::string pathCopies;
   pathCopies.resize(kNumRepetitions * max_size);
-  runBenchmarks(disambiguation2, "CanonicalizePath2 (SWAR)", pathCopies);
-  //runBenchmarks(disambiguation4, "CanonicalizePath4 (loop then switch)", pathCopies);
-  //runBenchmarks(disambiguation3, "CanonicalizePath3 (duff)", pathCopies);
+  runBenchmarks(disambiguationFast, "CanonicalizePathFast (SWAR)", pathCopies);
   runBenchmarks(disambiguation, "CanonicalizePath (original)", pathCopies);
-  //runBenchmarks(disambiguation3, "CanonicalizePath3", pathCopies);
   //runBenchmarks(CheatyPath, "CheatyPath", pathCopies);
 
   // add additional implementations here for comparison
