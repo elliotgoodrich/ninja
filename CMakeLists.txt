@@ -150,6 +150,7 @@ add_library(libninja OBJECT
 	src/state.cc
 	src/status_printer.cc
 	src/string_piece_util.cc
+	src/swar.cc
 	src/util.cc
 	src/version.cc
 )

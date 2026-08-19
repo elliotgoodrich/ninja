@@ -561,6 +561,7 @@ for name in ['build',
              'state',
              'status_printer',
              'string_piece_util',
+             'swar',
              'util',
              'version']:
     objs += cxx(name, variables=cxxvariables)
