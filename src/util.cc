@@ -810,8 +810,12 @@ void CanonicalizePath2(string* path, uint64_t* slash_bits) {
 }
 
 
+/// The general implementation, handling every path that needs modification.
+/// The common case, a path that canonicalizes to itself, never reaches it:
+/// CanonicalizePath2 filters those out with a much cheaper streaming scan.
 NEEDS_BMI2_INTRINSICS
-void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
+static void CanonicalizePath2Slow(char* path, std::size_t* len,
+                                  std::uint64_t* slash_bit) {
 #define NEED_BACKSLASH 1
   const char* dst_start = path;
 
@@ -868,7 +872,7 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     std::uint64_t slashdot_indicator =
         get_slashdot_indicator(buffer, words_used);
 
-#if NEED_BACKSLASH
+#ifdef _WIN32
     // TODO: Can we do this first, then not generate the indicator, then just
     // generate it from moving get_slashdot_indicator afterwards?
     const std::uint64_t backslash_indicator =
@@ -877,6 +881,10 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
     if (backslash_indicator) {
       std::memcpy(next - chunk_size, buffer, chunk_size);
     }
+#else
+    // Backslashes are ordinary bytes on POSIX; a zero indicator makes every
+    // backslash-related computation below fold away.
+    const std::uint64_t backslash_indicator = 0;
 #endif
 
     // Quick exit if we don't need to update slash_bits
@@ -1130,6 +1138,127 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   }
   *len = dst - path;
   *slash_bit = output_slashes;
+}
+
+NEEDS_BMI2_INTRINSICS
+void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
+  if (*len == 0) {
+    *slash_bit = 0;
+    return;
+  }
+  const char* const end = path + *len;
+
+  // A trailing separator always needs trimming.
+  if (IsPathSeparator(end[-1])) {
+    CanonicalizePath2Slow(path, len, slash_bit);
+    return;
+  }
+
+#ifdef _WIN32
+  std::uint64_t bits = 0;
+  unsigned count = 0;
+  bool any_backslash = false;
+#endif
+
+  // Leading "../" components are preserved by canonicalization, so consume
+  // them here before the scan below would flag their ".." as a modification.
+  // On Windows their separators still count towards slash_bits.
+  const char* src = path;
+  while (end - src >= 3 && src[0] == '.' && src[1] == '.' &&
+         IsPathSeparator(src[2])) {
+#ifdef _WIN32
+    if (src[2] == '\\') {
+      any_backslash = true;
+      if (count < 64)
+        bits |= static_cast<std::uint64_t>(1) << count;
+    }
+    ++count;
+#endif
+    src += 3;
+  }
+
+  // Detect whether the rest of the path canonicalizes to itself.  Every
+  // modification ("//", "/./", "/../", a trailing "/." or "/..") contains two
+  // ADJACENT slash-or-dot bytes, so one streaming scan for such a pair
+  // decides it.  Rare false positives (e.g. "a..b", "/.hidden") just take the
+  // general path and stay correct.  The scan writes nothing, so bailing out
+  // hands CanonicalizePath2Slow the pristine input.
+  //
+  // `carry` holds the would-be bit 7 flag of the byte preceding the current
+  // word: after the "../" skip that byte is a separator, so a further
+  // adjacent slash or dot spans the boundary (e.g. "..//x").
+  std::uint64_t carry = src != path ? 0x80 : 0;
+  const char* p = src;
+  std::size_t remaining = end - p;
+  for (;;) {
+    std::uint64_t w;
+    if (remaining >= 8) {
+      std::memcpy(&w, p, 8);
+    } else if (remaining > 0) {
+      // Zero fill: a zero byte is no separator or dot, so it cannot create a
+      // false pair.
+      w = 0;
+      std::memcpy(&w, p, remaining);
+    } else {
+      break;
+    }
+
+    // '.' (0x2E) and '/' (0x2F) differ only in bit 0, so one comparison with
+    // that bit forced on finds both.
+    const std::uint64_t slash_or_dot = equal(w | lsb, '/') & msb;
+#ifdef _WIN32
+    const std::uint64_t backslashes = equal(w, '\\') & msb;
+    const std::uint64_t slashdot = slash_or_dot | backslashes;
+#else
+    const std::uint64_t slashdot = slash_or_dot;
+#endif
+
+    if (slashdot & ((slashdot << 8) | carry)) {
+      CanonicalizePath2Slow(path, len, slash_bit);
+      return;
+    }
+    carry = (slashdot >> 63) ? 0x80 : 0;
+
+#ifdef _WIN32
+    // Bit 0 of the original byte separates the slashes from the dots.
+    const std::uint64_t forwardslashes = slash_or_dot & ((w & lsb) << 7);
+    const std::uint64_t seps = forwardslashes | backslashes;
+    if (seps) {
+      if (backslashes) {
+        any_backslash = true;
+        if (count < 64)
+          bits |= _pext_u64(backslashes, seps) << count;
+      }
+      count += popcnt64(seps);
+    }
+#endif
+    if (remaining < 8)
+      break;
+    p += 8;
+    remaining -= 8;
+  }
+
+#ifdef _WIN32
+  // The path is already canonical; only separator normalization remains.
+  if (any_backslash) {
+    char* q = path;
+    while (end - q >= 8) {
+      std::uint64_t w;
+      std::memcpy(&w, q, 8);
+      const std::uint64_t backslashes = equal(w, '\\') & msb;
+      w ^= (backslashes >> 7) * 0x73ull;
+      std::memcpy(q, &w, 8);
+      q += 8;
+    }
+    for (; q != path + *len; ++q) {
+      if (*q == '\\')
+        *q = '/';
+    }
+  }
+  *slash_bit = bits;
+#else
+  *slash_bit = 0;
+#endif
 }
 
 void CanonicalizePath4(string* path, uint64_t* slash_bits) {

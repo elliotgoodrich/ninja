@@ -37,9 +37,11 @@ TEST(CanonicalizePath, PathSamples) {
   EXPECT_EQ("foo", path);
   // TESTEND
 
+#ifdef _WIN32
   path = ".\\foo.h";
   CanonicalizePath(&path);
   EXPECT_EQ("foo.h", path);
+#endif
 
   path = "./foo.h";
   CanonicalizePath(&path);
@@ -582,12 +584,11 @@ TEST(CanonicalizePath, TooManyComponents) {
   EXPECT_EQ(slash_bits, 0x0);
 }
 
-// POSIX twin of the Windows DifferentialAgainstReference test.  The alphabet
-// omits '\\' because the POSIX scalar CanonicalizePath does not treat it as a
-// separator, but the chunk-boundary logic under test is slash/dot driven and
-// platform independent.
+// POSIX twin of the Windows DifferentialAgainstReference test.  '\\' is an
+// ordinary byte on POSIX for both implementations, so it stays in the
+// alphabet to prove no Windows backslash handling leaks in.
 TEST(CanonicalizePath, DifferentialAgainstReferencePosix) {
-  const char alphabet[] = { 'a', 'b', '/', '.' };
+  const char alphabet[] = { 'a', 'b', '/', '.', '\\' };
   // Deterministic xorshift64 PRNG so failures are reproducible.
   uint64_t state = 0x9E3779B97F4A7C15ull;
   auto next = [&state]() {
