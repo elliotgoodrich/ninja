@@ -72,6 +72,26 @@ inline int popcnt64(std::uint64_t x) {
 #endif
 }
 
+/// Return the index of the lowest set bit of \a x, which must be non-zero.
+inline unsigned first_set_bit(std::uint64_t x) {
+  unsigned long bit_pos;
+  [[maybe_unused]] const bool okay = bit_scan_forward64(&bit_pos, x);
+  assert(okay);
+  return static_cast<unsigned>(bit_pos);
+}
+
+/// Return a mask of the bits in positions [start, end), where \a end is one
+/// past the last position.
+inline std::uint64_t bits_between(std::int8_t start, std::int8_t end) {
+  assert(start <= end);
+  assert(end <= 64);
+  // Guard the empty range: `ones >> (64 - end)` is undefined for end == 0.
+  if (start >= end)
+    return static_cast<std::uint64_t>(0);
+  const std::uint64_t ones = ~static_cast<std::uint64_t>(0);
+  return (ones << start) & (ones >> (64 - end));
+}
+
 inline std::uint64_t equal(std::uint64_t lhs, std::uint8_t c) {
   const std::uint64_t rhs = 0x0101010101010101ull * c;
   const std::uint64_t zero_if_equal = lhs ^ rhs;

@@ -952,27 +952,11 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
         ((dot_bits << 1u) | (previous_dots >> 63)) &
       slash_bits;
 
-    const auto bits_between = [](std::int8_t start, std::int8_t end) {
-      // end is one past the end
-      assert(start <= end);
-      assert(end <= 64);
-      // Guard the empty range: `ones >> (64 - end)` is undefined for end == 0.
-      if (start >= end)
-        return static_cast<std::uint64_t>(0);
-      const std::uint64_t ones = ~static_cast<std::uint64_t>(0);
-      return (ones << start) & (ones >> (64 - end));
-    };
-
     // For each parent path, find and mark the previous directory for removal
     std::uint64_t remaining_parent = parent_path_indicator;
     while (remaining_parent) {
-      const std::int8_t first = [&] {
-        unsigned long bit_pos;
-        [[maybe_unused]] const bool okay =
-            bit_scan_forward64(&bit_pos, remaining_parent);
-        assert(okay);
-        return bit_pos;
-      }();
+      const std::int8_t first =
+          static_cast<std::int8_t>(first_set_bit(remaining_parent));
 
       // Slashes in this chunk before the "../" closing slash, ignoring any
       // already removed or made immutable.
