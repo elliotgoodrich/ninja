@@ -645,6 +645,22 @@ TEST(CanonicalizePath, BoundarySpanningParent) {
   }
 }
 
+// A ".." that empties the entire output right at a chunk boundary used to
+// leave a following "dir/.." unresolved: pop_spanning_component reported
+// failure for an empty output even though the directory it should cancel sat
+// wholly inside the current chunk.
+TEST(CanonicalizePath, PopToEmptyAtBoundary) {
+  string path;
+  uint64_t slash_bits;
+  for (int i = 1; i < 140; ++i) {
+    path.assign(i, 'a');
+    path += "/../x/../y";
+    CanonicalizePath2(&path, &slash_bits);
+    EXPECT_EQ("y", path) << "i=" << i;
+    EXPECT_EQ(0u, slash_bits);
+  }
+}
+
 TEST(CanonicalizePath, UpDir) {
   string path, err;
   path = "../../foo/bar.h";

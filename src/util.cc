@@ -765,7 +765,12 @@ struct InPlaceStringModifier {
   /// match pop_component.
   int pop_spanning_component(char* floor, bool head_all_dots, int head_len) {
     char* end = out_;
-    if (end <= floor)
+    // An empty output is not a failure: earlier ".."s may have popped
+    // everything back to floor, leaving the spanning component with an empty
+    // tail.  The component is then just the head, which the whole-component
+    // ".." test below still guards, so fall through with tail_len == 0
+    // instead of refusing and leaving the "/../" unresolved.
+    if (end < floor)
       return -1;
     char* p = component_start(floor, end);
     const std::ptrdiff_t tail_len = end - p;
