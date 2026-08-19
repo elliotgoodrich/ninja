@@ -67,6 +67,14 @@
 
 #include <cstring>
 
+// The fallback must stay out of line: inlined into CanonicalizePath2 it
+// bloats the scan loop that every already-canonical path runs to completion.
+#ifdef _MSC_VER
+#define NINJA_NOINLINE __declspec(noinline)
+#else
+#define NINJA_NOINLINE __attribute__((noinline))
+#endif
+
 using namespace std;
 
 namespace {
@@ -813,6 +821,15 @@ void CanonicalizePath2(string* path, uint64_t* slash_bits) {
 /// The general implementation, handling every path that needs modification.
 /// The common case, a path that canonicalizes to itself, never reaches it:
 /// CanonicalizePath2 filters those out with a much cheaper streaming scan.
+/// Hand a path the scan cannot finish to the scalar implementation, which is
+/// both simpler and, measured on canon_perftest, faster than the SWAR chunk
+/// machine it replaces here.
+static NINJA_NOINLINE void CanonicalizePathFallback(char* path,
+                                                    std::size_t* len,
+                                                    std::uint64_t* slash_bits) {
+  CanonicalizePath(path, len, slash_bits);
+}
+
 NEEDS_BMI2_INTRINSICS
 static void CanonicalizePath2Slow(char* path, std::size_t* len,
                                   std::uint64_t* slash_bit) {
@@ -1215,7 +1232,7 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
             slash_or_dot ^ separators_of(w, slash_or_dot);
         if ((dots & (dots << 8)) ||
             (carry != 0 && p[-1] == '.' && (dots & 0x80) != 0)) {
-          CanonicalizePath2Slow(path, len, slash_bit);
+          CanonicalizePathFallback(path, len, slash_bit);
           return;
         }
 #endif
@@ -1271,7 +1288,7 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
 #ifdef _WIN32
   // Backslash conversion and slash_bits accounting are only worth their
   // complexity in the general implementation.
-  CanonicalizePath2Slow(path, len, slash_bit);
+  CanonicalizePathFallback(path, len, slash_bit);
 #else
   // Remove the empty ("//") and current ("/./") components from `from` on,
   // where the scan found the first adjacent pair.  Everything before it is
@@ -1336,7 +1353,7 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
         std::memmove(out, in, end - in);
         *len = static_cast<std::size_t>(out - path) + (end - in);
       }
-      CanonicalizePath2Slow(path, len, slash_bit);
+      CanonicalizePathFallback(path, len, slash_bit);
       return;
     }
 
