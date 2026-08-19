@@ -581,7 +581,69 @@ TEST(CanonicalizePath, TooManyComponents) {
   CanonicalizePath(&path, &slash_bits);
   EXPECT_EQ(slash_bits, 0x0);
 }
+
+// POSIX twin of the Windows DifferentialAgainstReference test.  The alphabet
+// omits '\\' because the POSIX scalar CanonicalizePath does not treat it as a
+// separator, but the chunk-boundary logic under test is slash/dot driven and
+// platform independent.
+TEST(CanonicalizePath, DifferentialAgainstReferencePosix) {
+  const char alphabet[] = { 'a', 'b', '/', '.' };
+  // Deterministic xorshift64 PRNG so failures are reproducible.
+  uint64_t state = 0x9E3779B97F4A7C15ull;
+  auto next = [&state]() {
+    state ^= state << 13;
+    state ^= state >> 7;
+    state ^= state << 17;
+    return state;
+  };
+  const int lengths[] = { 1,   2,   3,   8,   31,  55,  60,  61,  62,  63,
+                          64,  65,  66,  67,  70,  80,  100, 126, 127, 128,
+                          129, 130, 190, 191, 192, 193, 200, 255, 256, 257 };
+  for (size_t li = 0; li < sizeof(lengths) / sizeof(lengths[0]); ++li) {
+    const int len = lengths[li];
+    for (int iter = 0; iter < 2000; ++iter) {
+      string in;
+      in.reserve(len);
+      for (int k = 0; k < len; ++k)
+        in += alphabet[next() % sizeof(alphabet)];
+      string ref = in, swar = in;
+      uint64_t ref_bits = 0, swar_bits = 0;
+      CanonicalizePath(&ref, &ref_bits);
+      CanonicalizePath2(&swar, &swar_bits);
+      ASSERT_EQ(ref, swar) << "input=[" << in << "]";
+      ASSERT_EQ(ref_bits, swar_bits) << "input=[" << in << "] out=[" << ref << "]";
+    }
+  }
+}
 #endif  // !_WIN32
+
+// Directory names longer than the SWAR backward-scan word, straddling the
+// 64-byte chunk boundary and cancelled by ".." components in later chunks.
+// This exercises InPlaceStringModifier::pop_component and
+// pop_spanning_component at every alignment.
+TEST(CanonicalizePath, BoundarySpanningParent) {
+  string path, expected;
+  uint64_t slash_bits;
+
+  for (int i = 1; i < 140; ++i) {
+    path.assign(i, 'a');
+    expected = path + "/c";
+    path += "/bbbbbbbbbbbbbbbbbbbb/../c";
+    CanonicalizePath2(&path, &slash_bits);
+    EXPECT_EQ(expected, path) << "i=" << i;
+    EXPECT_EQ(0u, slash_bits);
+  }
+
+  for (int i = 1; i < 140; ++i) {
+    // A ".." cascade that pops components written several chunks earlier.
+    path.assign(i, 'a');
+    expected = path;
+    path += "/bbbbbbbbbb/cccccccccc/dddddddddd/../../..";
+    CanonicalizePath2(&path, &slash_bits);
+    EXPECT_EQ(expected, path) << "i=" << i;
+    EXPECT_EQ(0u, slash_bits);
+  }
+}
 
 TEST(CanonicalizePath, UpDir) {
   string path, err;

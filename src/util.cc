@@ -878,6 +878,42 @@ struct ChunkedReader {
 
 };
 
+/// SWAR backward scan over already-written output: return the start of the
+/// trailing path component of [floor, end), i.e. the smallest p > floor with
+/// p[-1] == '/', or floor when [floor, end) contains no separator.  Only '/'
+/// needs testing because pops never happen while processing the first chunk,
+/// so every byte scanned here was emitted after convert_backslashes normalized
+/// its separators.  Note the exact `equal` detector is required: the cheaper
+/// (x - lsb) & ~x form is inexact and, since '.' ^ '/' == 0x01, a borrow out
+/// of a matched '/' byte would flag a neighbouring '.' as a separator.
+static char* component_start(char* floor, char* end) {
+  char* cur = end;
+  while (cur - floor >= 8) {
+    std::uint64_t w;
+    std::memcpy(&w, cur - 8, sizeof(w));
+    const std::uint64_t match = equal(w, '/') & msb;
+    if (match) {
+      unsigned long bit;
+      bit_scan_reverse64(&bit, match);
+      return cur - 8 + (bit >> 3) + 1;
+    }
+    cur -= 8;
+  }
+  // Fewer than 8 bytes remain above floor; load only what exists so the read
+  // stays inside the string.  The zero fill cannot match '/'.
+  if (cur > floor) {
+    std::uint64_t w = 0;
+    std::memcpy(&w, floor, cur - floor);
+    const std::uint64_t match = equal(w, '/') & msb;
+    if (match) {
+      unsigned long bit;
+      bit_scan_reverse64(&bit, match);
+      return floor + (bit >> 3) + 1;
+    }
+  }
+  return floor;
+}
+
 struct InPlaceStringModifier {
   // "abc"
   // all start at a
@@ -954,9 +990,7 @@ struct InPlaceStringModifier {
       --end;
       *removed_prior_slash = 1;
     }
-    char* p = end;
-    while (p > floor && !IsPathSeparator(p[-1]))
-      --p;
+    char* p = component_start(floor, end);
     if (end - p == 2 && p[0] == '.' && p[1] == '.')
       return -1;
     // Drop the component and the dangling dots, but keep the separator that
@@ -978,9 +1012,7 @@ struct InPlaceStringModifier {
     char* end = out_;
     if (end <= floor)
       return -1;
-    char* p = end;
-    while (p > floor && !IsPathSeparator(p[-1]))
-      --p;
+    char* p = component_start(floor, end);
     const std::ptrdiff_t tail_len = end - p;
     if (tail_len + head_len == 2 && head_all_dots) {
       bool tail_all_dots = true;
@@ -1032,6 +1064,7 @@ std::uint64_t get_slashdot_indicator(const std::uint64_t* buffer, std::size_t co
   return slashdot_indicator;
 }
 
+NEEDS_BMI2_INTRINSICS
 std::uint64_t convert_backslashes(std::uint64_t* buffer, std::size_t count) {
   const std::uint64_t backslashes = lsb * '\\';
   std::uint64_t any_equal = 0;
@@ -1099,14 +1132,19 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
 
   // Preserve the initial slash (or double slash on windows)
   if (*len >= 1 && IsPathSeparator(path[0])) {
+#ifdef _WIN32
+    // Windows network path starts with //
     if (*len >= 2 && IsPathSeparator(path[1])) {
       mutable_chars = ~static_cast<std::uint64_t>(0b11);
       dst_start += 2;
-    }
-    else {
+    } else {
       mutable_chars = ~static_cast<std::uint64_t>(0b1);
       dst_start += 1;
     }
+#else
+    mutable_chars = ~static_cast<std::uint64_t>(0b1);
+    dst_start += 1;
+#endif
   }
 
   // Track the start of a contiguous region we haven't copied yet.
