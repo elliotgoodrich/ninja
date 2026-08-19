@@ -25,6 +25,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 #ifdef _WIN32
 #include <intrin.h>
@@ -72,6 +73,29 @@ inline int popcnt64(std::uint64_t x) {
 #endif
 }
 
+/// Load the \a n bytes at \a p, at most 8, into the low bytes of a word and
+/// zero fill the rest.  A zero byte matches no path character, so the fill
+/// never looks like content.
+inline std::uint64_t load_word(const char* p, std::size_t n) {
+  // The whole-word copy must keep its constant size: handing memcpy a length
+  // the compiler cannot fold turns this into a real call and costs the
+  // scanning loops around half their speed.
+  std::uint64_t w;
+  if (n >= 8) {
+    std::memcpy(&w, p, 8);
+  } else {
+    w = 0;
+    std::memcpy(&w, p, n);
+  }
+  return w;
+}
+
+/// The high bit of each of the \a n bytes a load_word() actually read.
+inline std::uint64_t valid_bytes(std::size_t n) {
+  return n >= 8 ? msb
+                : (msb & ((static_cast<std::uint64_t>(1) << (8 * n)) - 1));
+}
+
 /// Return the index of the lowest set bit of \a x, which must be non-zero.
 inline unsigned first_set_bit(std::uint64_t x) {
   unsigned long bit_pos;
@@ -96,6 +120,18 @@ inline std::uint64_t equal(std::uint64_t lhs, std::uint8_t c) {
   const std::uint64_t rhs = 0x0101010101010101ull * c;
   const std::uint64_t zero_if_equal = lhs ^ rhs;
   return ~(zero_if_equal | ((zero_if_equal | msb) - lsb));
+}
+
+/// Set the high bit of every byte of \a w holding '/' or '.'.  They differ
+/// only in bit 0, so forcing that bit on finds both with one comparison.
+inline std::uint64_t separators_or_dots(std::uint64_t w) {
+  return equal(w | lsb, '/') & msb;
+}
+
+/// Split the result of separators_or_dots(): bit 0 of the original byte is
+/// what tells a '/' from a '.'.
+inline std::uint64_t separators_of(std::uint64_t w, std::uint64_t both) {
+  return both & ((w & lsb) << 7);
 }
 
 // Set MSB for each char to 1 if it equals 'c'

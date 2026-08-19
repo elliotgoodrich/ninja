@@ -1140,6 +1140,141 @@ static void CanonicalizePath2Slow(char* path, std::size_t* len,
   *slash_bit = output_slashes;
 }
 
+#ifndef _WIN32
+/// Remove the empty ("//") and current ("/./") components of \a path,
+/// starting from \a from where CanonicalizePath2's scan found the first
+/// adjacent pair.  Everything before that is already canonical and stays put.
+///
+/// Only a ".." needs the general implementation.  Meeting one hands the path
+/// over mid-flight, together with whatever has been removed so far: dropping
+/// empty and current components never changes what a ".." resolves to, so
+/// CanonicalizePath2Slow finishes from the shortened path just as well.
+NEEDS_BMI2_INTRINSICS
+static void CanonicalizePath2Removing(char* path, std::size_t* len,
+                                      std::uint64_t* slash_bit,
+                                      std::size_t from) {
+  char* const end = path + *len;
+  // The leading separator is never removed.  The byte before the first one
+  // examined counts as a separator, which is what makes a following "/" an
+  // empty path and a leading "./" a current path.
+  char* const floor = path + (IsPathSeparator(path[0]) ? 1 : 0);
+
+  char* in = path + from;
+  if (in < floor)
+    in = floor;
+  char* out = in;
+  // Bytes in [copy_from, in) survive but have not moved yet.  Deferring them
+  // until a removal or the end of the path turns the long clean stretches
+  // between removals into single memmoves.
+  char* copy_from = in;
+
+  std::uint64_t sep_carry1 = 0x80;
+  std::uint64_t dot_carry1 = 0;
+  std::uint64_t sep_carry2 = 0x8080;
+  if (in > floor) {
+    // The scan advances a word at a time, so two bytes always precede a
+    // hand-off past the first word.
+    sep_carry1 = IsPathSeparator(in[-1]) ? 0x80 : 0;
+    dot_carry1 = in[-1] == '.' ? 0x80 : 0;
+    sep_carry2 = (IsPathSeparator(in[-1]) ? 0x8000ull : 0ull) |
+                 (IsPathSeparator(in[-2]) ? 0x80ull : 0ull);
+  }
+
+  while (in != end) {
+    const std::size_t n =
+        end - in >= 8 ? 8 : static_cast<std::size_t>(end - in);
+    const std::uint64_t w = load_word(in, n);
+    const std::uint64_t valid = valid_bytes(n);
+
+    const std::uint64_t both = separators_or_dots(w);
+    const std::uint64_t sep = separators_of(w, both);
+    const std::uint64_t dot = both ^ sep;
+
+    if ((dot & (dot << 8)) || (dot & dot_carry1)) {
+      // A possible "..".  Close the gap left by what has been removed so the
+      // general implementation sees one contiguous path.
+      if (copy_from != in) {
+        std::memmove(out, copy_from, in - copy_from);
+        out += in - copy_from;
+      }
+      if (out == path) {
+        // Every component so far was removed, so a separator now opening the
+        // remainder is an empty component and not a root.  Leaving it would
+        // turn a relative path into an absolute one.
+        while (in != end && IsPathSeparator(*in))
+          ++in;
+      }
+      if (out != in) {
+        std::memmove(out, in, end - in);
+        *len = static_cast<std::size_t>(out - path) + (end - in);
+      }
+      CanonicalizePath2Slow(path, len, slash_bit);
+      return;
+    }
+
+    // A separator whose previous byte is a separator closes an empty path.
+    const std::uint64_t empty = sep & ((sep << 8) | sep_carry1);
+    // A separator preceded by a dot preceded by a separator closes a "/./",
+    // which drops both the dot and that closing separator.  The masks hold
+    // the original byte classes, never the packed output, so a chain like
+    // "a/././b" collapses in this single pass.
+    const std::uint64_t current =
+        sep & ((dot << 8) | dot_carry1) & ((sep << 16) | sep_carry2);
+    const std::uint64_t keep = valid & ~(empty | current | (current >> 8));
+
+    if (keep != valid) {
+      // When the closing separator of a "/./" opens this word, its dot is the
+      // last byte before it.  A dot only ever goes when its own closing
+      // separator does, so that dot survived its own word: either it is still
+      // waiting to be copied, in which case the copy simply stops short of
+      // it, or it was already written and has to be un-written.
+      char* const stop = in - ((current & 0x80) ? 1 : 0);
+      if (copy_from > stop) {
+        --out;
+      } else if (copy_from != stop) {
+        std::memmove(out, copy_from, stop - copy_from);
+        out += stop - copy_from;
+      }
+
+      // 0xFF per kept byte.  The arithmetic stays inside each byte, so
+      // adjacent kept bytes do not interact.
+      const std::uint64_t byte_mask = (keep - (keep >> 7)) | keep;
+      const std::uint64_t packed = _pext_u64(w, byte_mask);
+      const int kept = popcnt64(keep);
+      std::memcpy(out, &packed, kept);
+      out += kept;
+      copy_from = in + n;
+    }
+
+    sep_carry1 = (sep >> 56) & 0x80;
+    dot_carry1 = (dot >> 56) & 0x80;
+    sep_carry2 = (sep >> 48) & 0x8080;
+    in += n;
+  }
+
+  if (copy_from != end) {
+    std::memmove(out, copy_from, end - copy_from);
+    out += end - copy_from;
+  }
+
+  // A trailing "/." never meets a closing separator, so the loop leaves it;
+  // drop the dot, then trim the trailing separator.  Both are pointer moves,
+  // which is what keeps the bytes past the shortened path untouched (see the
+  // NotNullTerminated test).
+  if (out - path >= 2 && out[-1] == '.' && IsPathSeparator(out[-2]))
+    --out;
+  if (out > floor && IsPathSeparator(out[-1]))
+    --out;
+  if (out == path) {
+    // Handle special cases like "./" -> "."
+    *out++ = '.';
+  }
+
+  *len = static_cast<std::size_t>(out - path);
+  *slash_bit = 0;
+}
+#endif  // !_WIN32
+
 NEEDS_BMI2_INTRINSICS
 void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   if (*len == 0) {
@@ -1150,7 +1285,11 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
 
   // A trailing separator always needs trimming.
   if (IsPathSeparator(end[-1])) {
+#ifdef _WIN32
     CanonicalizePath2Slow(path, len, slash_bit);
+#else
+    CanonicalizePath2Removing(path, len, slash_bit, 0);
+#endif
     return;
   }
 
@@ -1191,21 +1330,11 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
   const char* p = src;
   std::size_t remaining = end - p;
   for (;;) {
-    std::uint64_t w;
-    if (remaining >= 8) {
-      std::memcpy(&w, p, 8);
-    } else if (remaining > 0) {
-      // Zero fill: a zero byte is no separator or dot, so it cannot create a
-      // false pair.
-      w = 0;
-      std::memcpy(&w, p, remaining);
-    } else {
+    if (remaining == 0)
       break;
-    }
+    const std::uint64_t w = load_word(p, remaining);
 
-    // '.' (0x2E) and '/' (0x2F) differ only in bit 0, so one comparison with
-    // that bit forced on finds both.
-    const std::uint64_t slash_or_dot = equal(w | lsb, '/') & msb;
+    const std::uint64_t slash_or_dot = separators_or_dots(w);
 #ifdef _WIN32
     const std::uint64_t backslashes = equal(w, '\\') & msb;
     const std::uint64_t slashdot = slash_or_dot | backslashes;
@@ -1214,15 +1343,20 @@ void CanonicalizePath2(char* path, std::size_t* len, std::uint64_t* slash_bit) {
 #endif
 
     if (slashdot & ((slashdot << 8) | carry)) {
+      // "//" and "/./" are removed without the general implementation; only
+      // a ".." reaches it, and then from inside the remover.
+#ifdef _WIN32
       CanonicalizePath2Slow(path, len, slash_bit);
+#else
+      CanonicalizePath2Removing(path, len, slash_bit,
+                                static_cast<std::size_t>(p - path));
+#endif
       return;
     }
     carry = (slashdot >> 63) ? 0x80 : 0;
 
 #ifdef _WIN32
-    // Bit 0 of the original byte separates the slashes from the dots.
-    const std::uint64_t forwardslashes = slash_or_dot & ((w & lsb) << 7);
-    const std::uint64_t seps = forwardslashes | backslashes;
+    const std::uint64_t seps = separators_of(w, slash_or_dot) | backslashes;
     if (seps) {
       if (backslashes) {
         any_backslash = true;
