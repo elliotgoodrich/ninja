@@ -81,6 +81,14 @@
 #include <intrin.h>
 #endif
 
+// SSE2 is part of the x86-64 baseline, so it needs no extra compiler flags or
+// runtime checks.  Other targets use the SWAR code.
+#if defined(__SSE2__) || defined(_M_X64) || \
+    (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+#define NINJA_CANONICALIZE_SSE2
+#include <emmintrin.h>
+#endif
+
 using namespace std;
 
 namespace {
@@ -266,6 +274,133 @@ std::uint64_t NormalizeSeparators(char* start, std::size_t len) {
   return bits;
 }
 
+#ifdef NINJA_CANONICALIZE_SSE2
+
+/// Return a 16-bit mask with bit i set if byte i of \a v is a separator or a
+/// dot, and set \a *backslashes to the bits of the bytes that are '\\'.
+inline unsigned SeparatorsOrDots(__m128i v, unsigned* backslashes) {
+  static_assert(('.' | 1) == '/', "ASCII required");
+  const __m128i slash_or_dot =
+      _mm_cmpeq_epi8(_mm_or_si128(v, _mm_set1_epi8(1)), _mm_set1_epi8('/'));
+#ifdef NINJA_WINDOWS_STYLE_PATHS
+  const __m128i bs = _mm_cmpeq_epi8(v, _mm_set1_epi8('\\'));
+  *backslashes = static_cast<unsigned>(_mm_movemask_epi8(bs));
+  return static_cast<unsigned>(
+      _mm_movemask_epi8(_mm_or_si128(slash_or_dot, bs)));
+#else
+  *backslashes = 0;
+  return static_cast<unsigned>(_mm_movemask_epi8(slash_or_dot));
+#endif
+}
+
+/// Load the \a n < 16 bytes at \a p into the low lanes of a vector and zero
+/// the rest, without reading outside [valid_from, p + n).
+inline __m128i LoadPartial(const char* valid_from, const char* p,
+                           std::size_t n) {
+  const std::uint64_t lo = LoadWord(valid_from, p, n < 8 ? n : 8);
+  const std::uint64_t hi = n > 8 ? LoadWord(valid_from, p + 8, n - 8) : 0;
+  return _mm_set_epi64x(static_cast<long long>(hi),
+                        static_cast<long long>(lo));
+}
+
+/// The same as TryGetCanonical(), but 16 bytes at a time with SSE2.
+inline bool TryGetCanonicalSse2(StringPiece* path, bool* any_backslash) {
+  const char* const begin = path->begin();
+  const char* const end = path->end();
+  unsigned backslashes_seen = 0;
+
+  // Preserve leading "../" components.
+  const char* p = begin;
+  while (end - p >= 3 && p[0] == '.' && p[1] == '.' && IsPathSeparator(p[2])) {
+    if (p[2] == '\\')
+      backslashes_seen = 1;
+    p += 3;
+  }
+
+  // As in TryGetCanonical(), look for two adjacent separators or dots.
+  unsigned carry = p != begin ? 1 : 0;
+  std::size_t remaining = end - p;
+  while (remaining >= 16) {
+    unsigned backslashes;
+    const unsigned slashdot = SeparatorsOrDots(
+        _mm_loadu_si128(reinterpret_cast<const __m128i*>(p)), &backslashes);
+    if (slashdot & ((slashdot << 1) | carry))
+      return false;
+    backslashes_seen |= backslashes;
+    carry = slashdot >> 15;
+    p += 16;
+    remaining -= 16;
+  }
+
+  if (remaining) {
+    unsigned slashdot, backslashes;
+    if (end - begin >= 16) {
+      // Load the last 16 bytes and drop the ones already checked.
+      const unsigned shift = static_cast<unsigned>(16 - remaining);
+      slashdot = SeparatorsOrDots(
+          _mm_loadu_si128(reinterpret_cast<const __m128i*>(end - 16)),
+          &backslashes);
+      slashdot >>= shift;
+      backslashes >>= shift;
+    } else {
+      slashdot = SeparatorsOrDots(LoadPartial(begin, p, remaining),
+                                  &backslashes);
+    }
+    if (slashdot & ((slashdot << 1) | carry))
+      return false;
+    backslashes_seen |= backslashes;
+  }
+
+  *any_backslash = backslashes_seen != 0;
+
+  // Dropping a trailing separator is all that is left to do.
+  if (path->size() > 1 && IsPathSeparator(end[-1]))
+    *path = StringPiece(begin, path->size() - 1);
+  return true;
+}
+
+/// The same as NormalizeSeparators(), but 16 bytes at a time with SSE2.
+std::uint64_t NormalizeSeparatorsSse2(char* start, std::size_t len) {
+  if (len < 16)
+    return NormalizeSeparators(start, len);
+
+  std::uint64_t bits = 0;
+  unsigned count = 0;
+  const __m128i backslash = _mm_set1_epi8('\\');
+  const __m128i slash = _mm_set1_epi8('/');
+  const __m128i flip = _mm_set1_epi8('/' ^ '\\');
+
+  // Process the 16 bytes at \a q, ignoring the first \a skip of them.
+  auto step = [&](char* q, unsigned skip) {
+    const __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(q));
+    const __m128i is_backslash = _mm_cmpeq_epi8(v, backslash);
+    const unsigned backslashes =
+        static_cast<unsigned>(_mm_movemask_epi8(is_backslash)) >> skip;
+    const unsigned seps =
+        (static_cast<unsigned>(_mm_movemask_epi8(_mm_cmpeq_epi8(v, slash))) >>
+         skip) |
+        backslashes;
+    if (backslashes) {
+      if (count < 64)
+        bits |= Pext(backslashes, seps) << count;
+      // Skipped bytes were already converted so contain no backslashes.
+      _mm_storeu_si128(reinterpret_cast<__m128i*>(q),
+                       _mm_xor_si128(v, _mm_and_si128(is_backslash, flip)));
+    }
+    count += PopCount64(seps);
+  };
+
+  char* q = start;
+  char* const stop = start + len;
+  for (; stop - q >= 16; q += 16)
+    step(q, 0);
+  if (q != stop)
+    step(stop - 16, static_cast<unsigned>(16 - (stop - q)));
+  return bits;
+}
+
+#endif  // NINJA_CANONICALIZE_SSE2
+
 }  // namespace
 
 void Fatal(const char* msg, ...) {
@@ -350,11 +485,19 @@ void CanonicalizePath(char* path, std::size_t* len, std::uint64_t* slash_bits) {
   // NormalizeSeparators() call.
   StringPiece prefix(path, *len);
   bool any_backslash;
+#ifdef NINJA_CANONICALIZE_SSE2
+  if (TryGetCanonicalSse2(&prefix, &any_backslash)) {
+    *len = prefix.size();
+    *slash_bits = any_backslash ? NormalizeSeparatorsSse2(path, *len) : 0;
+    return;
+  }
+#else
   if (TryGetCanonical(&prefix, &any_backslash)) {
     *len = prefix.size();
     *slash_bits = any_backslash ? NormalizeSeparators(path, *len) : 0;
     return;
   }
+#endif
 
   CanonicalizePathFallback(path, len, slash_bits);
 }
