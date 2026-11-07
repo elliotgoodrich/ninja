@@ -18,9 +18,11 @@
 #include "parser.h"
 
 #include <memory>
+#include <string>
+#include <utility>
 #include <vector>
 
-struct BindingEnv;
+struct FileScope;
 struct EvalString;
 
 enum DupeEdgeAction {
@@ -68,7 +70,7 @@ struct ManifestParser : public Parser {
   /// Parse either a 'subninja' or 'include' line.
   bool ParseFileInclude(bool new_scope, std::string* err);
 
-  BindingEnv* env_;
+  FileScope* scope_;
   ManifestParserOptions options_;
   bool quiet_;
 
@@ -77,6 +79,11 @@ struct ManifestParser : public Parser {
   // subparser_ is reused solely to get better reuse out ins_/outs_/validation_.
   std::unique_ptr<ManifestParser> subparser_;
   std::vector<EvalString> ins_, outs_, validations_;
+
+  // The variables in the build block of the edge being parsed.  Elements are
+  // never removed, only overwritten, so the vector and the memory of its keys
+  // are reused across invocations to ParseEdge() as well.
+  std::vector<std::pair<std::string, std::string>> edge_bindings_;
 };
 
 #endif  // NINJA_MANIFEST_PARSER_H_
