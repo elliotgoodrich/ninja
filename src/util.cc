@@ -552,8 +552,6 @@ void CanonicalizePathFallback(char* path, std::size_t* len,
 namespace {
 
 // Constants for the highest bit and lowest bit of each 8-byte word.
-const std::uint64_t msb = 0x80'80'80'80'80'80'80'80ull;
-const std::uint64_t lsb = 0x01'01'01'01'01'01'01'01ull;
 
 /// Return a word where the high bit of each byte is 1 iff the corresponding
 /// byte in \a w is equal to \a c, and every other bit is 0.
