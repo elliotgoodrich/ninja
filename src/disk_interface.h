@@ -15,6 +15,7 @@
 #ifndef NINJA_DISK_INTERFACE_H_
 #define NINJA_DISK_INTERFACE_H_
 
+#include <functional>
 #include <map>
 #include <string>
 
@@ -97,10 +98,12 @@ struct RealDiskInterface : public DiskInterface {
   /// Whether long paths are enabled.
   bool long_paths_enabled_;
 
-  typedef std::map<std::string, TimeStamp> DirCache;
+  // Both maps use std::less<> so that they can be searched with a
+  // std::string_view without building a std::string.
+  typedef std::map<std::string, TimeStamp, std::less<>> DirCache;
   // TODO: Neither a map nor a hashmap seems ideal here.  If the statcache
   // works out, come up with a better data structure.
-  typedef std::map<std::string, DirCache> Cache;
+  typedef std::map<std::string, DirCache, std::less<>> Cache;
   mutable Cache cache_;
 #endif
 };

@@ -15,6 +15,7 @@
 #include "disk_interface.h"
 
 #include <algorithm>
+#include <string_view>
 
 #include <errno.h>
 #include <stdio.h>
@@ -38,7 +39,10 @@ using namespace std;
 
 namespace {
 
-string DirName(const string& path) {
+/// Return the directory part of |path| without its trailing separators, or an
+/// empty view if |path| has no directory part.  The result points into
+/// |path|.
+string_view DirName(string_view path) {
 #ifdef _WIN32
   static const char kPathSeparators[] = "\\/";
 #else
@@ -46,9 +50,9 @@ string DirName(const string& path) {
 #endif
   static const char* const kEnd = kPathSeparators + sizeof(kPathSeparators) - 1;
 
-  string::size_type slash_pos = path.find_last_of(kPathSeparators);
-  if (slash_pos == string::npos)
-    return string();  // Nothing to do.
+  string_view::size_type slash_pos = path.find_last_of(kPathSeparators);
+  if (slash_pos == string_view::npos)
+    return string_view();  // Nothing to do.
   while (slash_pos > 0 &&
          std::find(kPathSeparators, kEnd, path[slash_pos - 1]) != kEnd)
     --slash_pos;
@@ -74,7 +78,90 @@ TimeStamp TimeStampFromFileTime(const FILETIME& filetime) {
   return (TimeStamp)mtime - 12622770400LL * (1000000000LL / 100);
 }
 
-TimeStamp StatSingleFile(const string& path, string* err) {
+TimeStamp StatSingleFile(const string& path, string* err);
+
+/// The FILE_STAT_BASIC_INFORMATION struct filled in by
+/// GetFileInformationByName(FileStatBasicByNameInfo).  It is declared here,
+/// with the same layout as in the Windows SDK, as older SDKs and builds
+/// targeting older versions of Windows don't declare it.
+struct FileStatBasicInformation {
+  LARGE_INTEGER FileId;
+  LARGE_INTEGER CreationTime;
+  LARGE_INTEGER LastAccessTime;
+  LARGE_INTEGER LastWriteTime;
+  LARGE_INTEGER ChangeTime;
+  LARGE_INTEGER AllocationSize;
+  LARGE_INTEGER EndOfFile;
+  DWORD FileAttributes;
+  DWORD ReparseTag;
+  DWORD NumberOfLinks;
+  DWORD DeviceType;
+  DWORD DeviceCharacteristics;
+  DWORD Reserved;
+  LARGE_INTEGER VolumeSerialNumber;
+  BYTE FileId128[16];
+};
+
+/// FILE_INFO_BY_NAME_CLASS::FileStatBasicByNameInfo.
+const int kFileStatBasicByNameInfo = 3;
+
+using GetFileInformationByNameFunc = BOOL(WINAPI*)(PCWSTR, int, PVOID, ULONG);
+
+/// GetFileInformationByName, which was added in Windows 11 24H2, or null if
+/// this version of Windows doesn't have it.  This is looked up once at
+/// startup, rather than in a function-local static, so that each stat
+/// doesn't pay for a thread-safe initialization check.
+const GetFileInformationByNameFunc g_get_file_information_by_name =
+    reinterpret_cast<GetFileInformationByNameFunc>(
+        reinterpret_cast<void*>(::GetProcAddress(
+            ::GetModuleHandleA("kernel32.dll"), "GetFileInformationByName")));
+
+/// Try to stat |path| with GetFileInformationByName, which is several times
+/// faster than GetFileAttributesEx as it doesn't open the file.  Return true
+/// and set |*mtime| if it could, or false if the caller should fall back to
+/// StatSingleFileSlow(), such as when the function isn't available, the file
+/// system doesn't support it, or |path| is a reparse point.
+bool StatSingleFileByName(const string& path, TimeStamp* mtime) {
+  const GetFileInformationByNameFunc get_info = g_get_file_information_by_name;
+  if (!get_info)
+    return false;
+
+  // Convert with the same code page that the "A" functions used elsewhere
+  // in ninja use, so that paths are interpreted the same way.
+  const int path_len = static_cast<int>(path.size());
+  const int wide_len =
+      ::MultiByteToWideChar(CP_ACP, 0, path.data(), path_len, NULL, 0);
+  if (wide_len == 0 && path_len != 0)
+    return false;
+  std::wstring wide_path(wide_len, L'\0');
+  ::MultiByteToWideChar(CP_ACP, 0, path.data(), path_len, &wide_path[0],
+                        wide_len);
+
+  FileStatBasicInformation info;
+  if (!get_info(wide_path.c_str(), kFileStatBasicByNameInfo, &info,
+                sizeof(info))) {
+    const DWORD win_err = ::GetLastError();
+    if (win_err == ERROR_FILE_NOT_FOUND || win_err == ERROR_PATH_NOT_FOUND) {
+      *mtime = 0;
+      return true;
+    }
+    // Leave unsupported file systems and real errors to the slow path, which
+    // produces the error message.
+    return false;
+  }
+
+  // Symlinks and other reparse points are resolved by the slow path.
+  if (info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+    return false;
+
+  FILETIME last_write;
+  last_write.dwLowDateTime = info.LastWriteTime.LowPart;
+  last_write.dwHighDateTime = static_cast<DWORD>(info.LastWriteTime.HighPart);
+  *mtime = TimeStampFromFileTime(last_write);
+  return true;
+}
+
+TimeStamp StatSingleFileSlow(const string& path, string* err) {
   WIN32_FILE_ATTRIBUTE_DATA attrs;
   if (!GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &attrs)) {
     DWORD win_err = GetLastError();
@@ -113,6 +200,13 @@ TimeStamp StatSingleFile(const string& path, string* err) {
   return TimeStampFromFileTime(attrs.ftLastWriteTime);
 }
 
+TimeStamp StatSingleFile(const string& path, string* err) {
+  TimeStamp mtime;
+  if (StatSingleFileByName(path, &mtime))
+    return mtime;
+  return StatSingleFileSlow(path, err);
+}
+
 bool IsWindows7OrLater() {
   OSVERSIONINFOEX version_info =
       { sizeof(OSVERSIONINFOEX), 6, 1, 0, 0, {0}, 0, 0, 0, 0, 0};
@@ -123,8 +217,12 @@ bool IsWindows7OrLater() {
       &version_info, VER_MAJORVERSION | VER_MINORVERSION, comparison);
 }
 
-bool StatAllFilesInDir(const string& dir, map<string, TimeStamp>* stamps,
-                       string* err) {
+char ToLowerForCache(char c) {
+  return static_cast<char>(::tolower(static_cast<unsigned char>(c)));
+}
+
+bool StatAllFilesInDir(string_view dir,
+                       map<string, TimeStamp, less<>>* stamps, string* err) {
   // FindExInfoBasic is 30% faster than FindExInfoStandard.
   static bool can_use_basic_info = IsWindows7OrLater();
   // This is not in earlier SDKs.
@@ -132,8 +230,13 @@ bool StatAllFilesInDir(const string& dir, map<string, TimeStamp>* stamps,
       static_cast<FINDEX_INFO_LEVELS>(1);
   FINDEX_INFO_LEVELS level =
       can_use_basic_info ? kFindExInfoBasic : FindExInfoStandard;
+
+  string pattern;
+  pattern.reserve(dir.size() + 2);
+  pattern.append(dir);
+  pattern.append("\\*");
   WIN32_FIND_DATAA ffd;
-  HANDLE find_handle = FindFirstFileExA((dir + "\\*").c_str(), level, &ffd,
+  HANDLE find_handle = FindFirstFileExA(pattern.c_str(), level, &ffd,
                                         FindExSearchNameMatch, NULL, 0);
 
   if (find_handle == INVALID_HANDLE_VALUE) {
@@ -141,29 +244,31 @@ bool StatAllFilesInDir(const string& dir, map<string, TimeStamp>* stamps,
     if (win_err == ERROR_FILE_NOT_FOUND || win_err == ERROR_PATH_NOT_FOUND ||
         win_err == ERROR_DIRECTORY)
       return true;
-    *err = "FindFirstFileExA(" + dir + "): " + GetLastErrorString();
+    *err = "FindFirstFileExA(" + string(dir) + "): " + GetLastErrorString();
     return false;
   }
   do {
-    string lowername = ffd.cFileName;
-    if (lowername == "..") {
+    if (strcmp(ffd.cFileName, "..") == 0) {
       // Seems to just copy the timestamp for ".." from ".", which is wrong.
       // This is the case at least on NTFS under Windows 7.
       continue;
     }
 
+    // The key is moved into |stamps|, so this is the only copy of the name.
+    string lowername = ffd.cFileName;
     transform(lowername.begin(), lowername.end(), lowername.begin(),
-              [](unsigned char c) {
-                return static_cast<char>(::tolower(c));
-              });
+              ToLowerForCache);
 
     if (ffd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
       // File is a symlink, stat the linked file.
-      stamps->insert(make_pair(
-          lowername, StatSingleFile(dir + "\\" + ffd.cFileName, err)));
+      // |pattern| without its trailing '*' is "<dir>\".
+      stamps->emplace(
+          std::move(lowername),
+          StatSingleFile(pattern.substr(0, pattern.size() - 1) + ffd.cFileName,
+                         err));
     } else {
-      stamps->insert(
-          make_pair(lowername, TimeStampFromFileTime(ffd.ftLastWriteTime)));
+      stamps->emplace(std::move(lowername),
+                      TimeStampFromFileTime(ffd.ftLastWriteTime));
     }
 
   } while (FindNextFileA(find_handle, &ffd));
@@ -177,7 +282,7 @@ bool StatAllFilesInDir(const string& dir, map<string, TimeStamp>* stamps,
 // DiskInterface ---------------------------------------------------------------
 
 bool DiskInterface::MakeDirs(const string& path) {
-  string dir = DirName(path);
+  const string dir(DirName(path));
   if (dir.empty())
     return true;  // Reached root; assume it's there.
   string err;
@@ -231,30 +336,39 @@ TimeStamp RealDiskInterface::Stat(const string& path, string* err) const {
   if (!use_cache_)
     return StatSingleFile(path, err);
 
-  string dir = DirName(path);
-  string base(path.substr(dir.size() ? dir.size() + 1 : 0));
+  string_view dir = DirName(path);
+  string_view base = string_view(path).substr(dir.size() ? dir.size() + 1 : 0);
   if (base == "..") {
     // StatAllFilesInDir does not report any information for base = "..".
     base = ".";
     dir = path;
   }
 
-  string dir_lowercase = dir;
-  auto to_lower = [](unsigned char c) {
-    return static_cast<char>(::tolower(c));
-  };
-  transform(dir.begin(), dir.end(), dir_lowercase.begin(), to_lower);
-  transform(base.begin(), base.end(), base.begin(), to_lower);
+  // Lowercase |dir| and |base| into one buffer for the cache lookups.  It is
+  // on the stack unless the path is too long to fit, which only happens with
+  // long paths enabled.
+  char stack_buffer[2 * MAX_PATH];
+  string heap_buffer;
+  char* lower = stack_buffer;
+  if (dir.size() + base.size() > sizeof(stack_buffer)) {
+    heap_buffer.resize(dir.size() + base.size());
+    lower = &heap_buffer[0];
+  }
+  transform(dir.begin(), dir.end(), lower, ToLowerForCache);
+  transform(base.begin(), base.end(), lower + dir.size(), ToLowerForCache);
+  const string_view dir_lowercase(lower, dir.size());
+  const string_view base_lowercase(lower + dir.size(), base.size());
 
   Cache::iterator ci = cache_.find(dir_lowercase);
   if (ci == cache_.end()) {
-    ci = cache_.insert(make_pair(dir_lowercase, DirCache())).first;
-    if (!StatAllFilesInDir(dir.empty() ? "." : dir, &ci->second, err)) {
+    ci = cache_.try_emplace(string(dir_lowercase)).first;
+    if (!StatAllFilesInDir(dir.empty() ? string_view(".") : dir, &ci->second,
+                           err)) {
       cache_.erase(ci);
       return -1;
     }
   }
-  DirCache::iterator di = ci->second.find(base);
+  DirCache::iterator di = ci->second.find(base_lowercase);
   return di != ci->second.end() ? di->second : 0;
 #else
 #ifdef __USE_LARGEFILE64
