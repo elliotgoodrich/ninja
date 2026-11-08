@@ -34,7 +34,9 @@ struct FileScope {
   FileScope(const FileScope&) = delete;
   FileScope& operator=(const FileScope&) = delete;
 
-  std::string LookupVariable(StringPiece var) const;
+  /// Append the value of \a var to \a out, appending nothing if it is not
+  /// defined in this scope or its parents.
+  void AppendVariable(StringPiece var, std::string* out) const;
   void AddBinding(const std::string& key, StringPiece val);
 
   void AddRule(std::unique_ptr<const Rule> rule);

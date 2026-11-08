@@ -76,19 +76,28 @@ struct EvalString {
   /// @pre `!text.empty()`.
   void AddSpecial(StringPiece text);
 
-  /// Return a string with all variables expanded using the given \a Env.
-  /// @pre `E` has a method with the signature `std::string
-  /// LookupVariable(StringRef)`
+  /// Append this string to \a out with all variables expanded using the
+  /// given \a env.
+  /// @pre `E` has a method with the signature
+  /// `void AppendVariable(StringPiece, std::string*)`
+  template <typename E>
+  void Evaluate(E* env, std::string* out) const {
+    for (const auto& token : *this) {
+      if (token.second == TokenType::RAW) {
+        out->append(token.first.str_, token.first.len_);
+      } else {
+        env->AppendVariable(token.first, out);
+      }
+    }
+  }
+
+  /// Return a string with all variables expanded using the given \a env.
+  /// @pre `E` has a method with the signature
+  /// `void AppendVariable(StringPiece, std::string*)`
   template <typename E>
   std::string Evaluate(E* env) const {
     std::string result;
-    for (const auto& token : *this) {
-      if (token.second == TokenType::RAW) {
-        result.append(token.first.str_, token.first.len_);
-      } else {
-        result.append(env->LookupVariable(token.first));
-      }
-    }
+    Evaluate(env, &result);
     return result;
   }
 

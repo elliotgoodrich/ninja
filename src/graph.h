@@ -202,6 +202,8 @@ struct Edge {
 
   /// Returns the shell-escaped value of |key|.
   std::string GetBinding(StringPiece key) const;
+  /// Appends the shell-escaped value of |key| to |out|.
+  void AppendBinding(StringPiece key, std::string* out) const;
   bool GetBindingBool(StringPiece key) const;
 
   /// Like GetBinding("depfile"), but without shell escaping.

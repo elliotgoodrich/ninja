@@ -106,14 +106,15 @@ TEST(EvalString, Serializing) {
 
 TEST(EvalString, Evaluate) {
   struct TestEnv {
-    std::string LookupVariable(StringPiece var) {
+    void AppendVariable(StringPiece var, std::string* out) {
       if (var == "empty")
-        return "";
+        return;
       if (var == "a")
-        return "a";
-      if (var == "b")
-        return "B";
-      return "MISSING";
+        out->append("a");
+      else if (var == "b")
+        out->append("B");
+      else
+        out->append("MISSING");
     }
   } env;
 

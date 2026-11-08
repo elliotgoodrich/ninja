@@ -48,10 +48,11 @@ struct StatusFormatScope {
   const string& description;
   StatusFormatScope(const StatusPrinter* p, const string& d)
       : printer(p), description(d) {}
-  string LookupVariable(StringPiece var) {
+  void AppendVariable(StringPiece var, string* out) {
     if (var == "description")
-      return description;
-    return printer->FormatStatusVariable(var);
+      out->append(description);
+    else
+      out->append(printer->FormatStatusVariable(var));
   }
 };
 }  // namespace

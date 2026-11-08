@@ -30,13 +30,14 @@ FileScope::FileScope(FileScope* parent) : parent_(parent) {}
 
 FileScope::~FileScope() = default;
 
-std::string FileScope::LookupVariable(StringPiece var) const {
-  const auto i = variables_.find(var);
-  if (i != variables_.end())
-    return i->second;
-  if (parent_)
-    return parent_->LookupVariable(var);
-  return "";
+void FileScope::AppendVariable(StringPiece var, std::string* out) const {
+  for (const FileScope* scope = this; scope; scope = scope->parent_) {
+    const auto i = scope->variables_.find(var);
+    if (i != scope->variables_.end()) {
+      out->append(i->second);
+      return;
+    }
+  }
 }
 
 void FileScope::AddBinding(const std::string& key, StringPiece val) {

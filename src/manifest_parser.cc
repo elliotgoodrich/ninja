@@ -40,10 +40,12 @@ struct EdgePathScope {
   explicit EdgePathScope(const EdgeBindings& bindings)
       : bindings_(bindings) {}
 
-  std::string LookupVariable(StringPiece var) const {
-    if (std::optional<StringPiece> value = bindings_.FindBinding(var))
-      return value->AsString();
-    return bindings_.parent().LookupVariable(var);
+  void AppendVariable(StringPiece var, std::string* out) const {
+    if (std::optional<StringPiece> value = bindings_.FindBinding(var)) {
+      out->append(value->str_, value->len_);
+      return;
+    }
+    bindings_.parent().AppendVariable(var, out);
   }
 
  private:
@@ -60,7 +62,9 @@ ManifestParser::ManifestParser(State* state, FileReader* file_reader,
 }
 
 std::string ManifestParser::LookupVariable(const std::string& varname) {
-  return scope_->LookupVariable(varname);
+  std::string result;
+  scope_->AppendVariable(varname, &result);
+  return result;
 }
 
 bool ManifestParser::Parse(const string& filename, const string& input,
@@ -92,12 +96,13 @@ bool ManifestParser::Parse(const string& filename, const string& input,
       value_.Clear();
       if (!ParseLet(&name, &value_, err))
         return false;
-      string value = value_.Evaluate(scope_);
+      evaluated_.clear();
+      value_.Evaluate(scope_, &evaluated_);
       // Check ninja_required_version immediately so we can exit
       // before encountering any syntactic surprises.
       if (name == "ninja_required_version")
-        CheckNinjaVersion(value, &lexer_.manifest_version_major, &lexer_.manifest_version_minor);
-      scope_->AddBinding(name, value);
+        CheckNinjaVersion(evaluated_, &lexer_.manifest_version_major, &lexer_.manifest_version_minor);
+      scope_->AddBinding(name, evaluated_);
       break;
     }
     case Lexer::INCLUDE:
@@ -144,9 +149,10 @@ bool ManifestParser::ParsePool(string* err) {
       return false;
 
     if (key == "depth") {
-      string depth_string = value_.Evaluate(scope_);
-      const char* begin = depth_string.data();
-      const char* end = begin + depth_string.size();
+      evaluated_.clear();
+      value_.Evaluate(scope_, &evaluated_);
+      const char* begin = evaluated_.data();
+      const char* end = begin + evaluated_.size();
       auto result = std::from_chars(begin, end, depth);
       if (result.ec != std::errc() || result.ptr != end || depth < 0) {
         return lexer_.Error("invalid pool depth", err);
@@ -337,26 +343,30 @@ bool ManifestParser::ParseEdge(string* err) {
     if (!ParseLet(&key, &value_, err))
       return false;
 
-    edge->bindings_.AddBinding(key, value_.Evaluate(scope_));
+    evaluated_.clear();
+    value_.Evaluate(scope_, &evaluated_);
+    edge->bindings_.AddBinding(key, evaluated_);
   }
   const EdgePathScope path_scope(edge->bindings_);
 
-  string pool_name = edge->GetBinding("pool");
-  if (!pool_name.empty()) {
-    Pool* pool = state_->LookupPool(pool_name);
+  evaluated_.clear();
+  edge->AppendBinding("pool", &evaluated_);
+  if (!evaluated_.empty()) {
+    Pool* pool = state_->LookupPool(evaluated_);
     if (pool == NULL)
-      return lexer_.Error("unknown pool name '" + pool_name + "'", err);
+      return lexer_.Error("unknown pool name '" + evaluated_ + "'", err);
     edge->pool_ = pool;
   }
 
   edge->outputs_.reserve(outs_.size());
   for (size_t i = 0, e = outs_.size(); i != e; ++i) {
-    string path = outs_[i].Evaluate(&path_scope);
-    if (path.empty())
+    evaluated_.clear();
+    outs_[i].Evaluate(&path_scope, &evaluated_);
+    if (evaluated_.empty())
       return lexer_.Error("empty path", err);
     uint64_t slash_bits;
-    CanonicalizePath(&path, &slash_bits);
-    Node *node = state_->GetNode(std::move(path), slash_bits);
+    CanonicalizePath(&evaluated_, &slash_bits);
+    Node *node = state_->GetNode(StringPiece(evaluated_), slash_bits);
     if (!state_->AddOut(edge, node, err)) {
       lexer_.Error(std::string(*err), err);
       return false;
@@ -374,12 +384,13 @@ bool ManifestParser::ParseEdge(string* err) {
 
   edge->inputs_.reserve(ins_.size());
   for (vector<EvalString>::iterator i = ins_.begin(); i != ins_.end(); ++i) {
-    string path = i->Evaluate(&path_scope);
-    if (path.empty())
+    evaluated_.clear();
+    i->Evaluate(&path_scope, &evaluated_);
+    if (evaluated_.empty())
       return lexer_.Error("empty path", err);
     uint64_t slash_bits;
-    CanonicalizePath(&path, &slash_bits);
-    Node *node = state_->GetNode(std::move(path), slash_bits);
+    CanonicalizePath(&evaluated_, &slash_bits);
+    Node *node = state_->GetNode(StringPiece(evaluated_), slash_bits);
     state_->AddIn(edge, node);
   }
   edge->implicit_deps_ = implicit;
@@ -388,12 +399,13 @@ bool ManifestParser::ParseEdge(string* err) {
   edge->validations_.reserve(validations_.size());
   for (std::vector<EvalString>::iterator v = validations_.begin();
       v != validations_.end(); ++v) {
-    string path = v->Evaluate(&path_scope);
-    if (path.empty())
+    evaluated_.clear();
+    v->Evaluate(&path_scope, &evaluated_);
+    if (evaluated_.empty())
       return lexer_.Error("empty path", err);
     uint64_t slash_bits;
-    CanonicalizePath(&path, &slash_bits);
-    Node *node = state_->GetNode(std::move(path), slash_bits);
+    CanonicalizePath(&evaluated_, &slash_bits);
+    Node *node = state_->GetNode(StringPiece(evaluated_), slash_bits);
     state_->AddValidation(edge, node);
   }
 

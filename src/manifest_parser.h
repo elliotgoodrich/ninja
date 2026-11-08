@@ -88,6 +88,8 @@ struct ManifestParser : public Parser {
   std::vector<EvalString> cache_;
   // value_ is reused while parsing variables and single paths.
   EvalString value_;
+  // evaluated_ is reused to hold the result of evaluating an EvalString.
+  std::string evaluated_;
 };
 
 #endif  // NINJA_MANIFEST_PARSER_H_
