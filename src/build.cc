@@ -1020,10 +1020,8 @@ bool Builder::ExtractDeps(BuildResult::CommandCompleted& result,
                           vector<Node*>* deps_nodes, string* err) {
   if (deps_type == "msvc") {
     CLParser parser;
-    string output;
-    if (!parser.Parse(result.output, deps_prefix, &output, err))
+    if (!parser.Parse(&result.output, deps_prefix, err))
       return false;
-    result.output = output;
     for (set<string>::iterator i = parser.includes_.begin();
          i != parser.includes_.end(); ++i) {
       // ~0 is assuming that with MSVC-parsed headers, it's ok to always make
