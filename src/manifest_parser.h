@@ -15,13 +15,13 @@
 #ifndef NINJA_MANIFEST_PARSER_H_
 #define NINJA_MANIFEST_PARSER_H_
 
+#include "eval_string.h"
 #include "parser.h"
 
 #include <memory>
 #include <vector>
 
 struct FileScope;
-struct EvalString;
 
 enum DupeEdgeAction {
   kDupeEdgeActionWarn,
@@ -65,6 +65,12 @@ struct ManifestParser : public Parser {
   bool ParseEdge(std::string* err);
   bool ParseDefault(std::string* err);
 
+  /// Read paths until an empty one, appending each to `paths`.
+  bool ReadPaths(std::vector<EvalString>* paths, std::string* err);
+
+  /// Return an empty EvalString, reusing one from `cache_` if possible.
+  EvalString TakeEvalString();
+
   /// Parse either a 'subninja' or 'include' line.
   bool ParseFileInclude(bool new_scope, std::string* err);
 
@@ -77,6 +83,11 @@ struct ManifestParser : public Parser {
   // subparser_ is reused solely to get better reuse out ins_/outs_/validation_.
   std::unique_ptr<ManifestParser> subparser_;
   std::vector<EvalString> ins_, outs_, validations_;
+  // Spare EvalStrings recycled from ins_/outs_/validations_ so that their
+  // buffers keep their capacity across calls to ParseEdge().
+  std::vector<EvalString> cache_;
+  // value_ is reused while parsing variables and single paths.
+  EvalString value_;
 };
 
 #endif  // NINJA_MANIFEST_PARSER_H_
