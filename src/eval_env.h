@@ -21,44 +21,11 @@
 #include <utility>
 #include <vector>
 
+#include "eval_string.h"
 #include "string_piece.h"
 #include "string_piece_util.h"
 
 struct Rule;
-
-/// A tokenized string that contains variable references.
-/// Can be evaluated relative to a scope.
-struct EvalString {
-  /// @return The evaluated string, with each variable expanded to the value
-  ///         returned by `scope->LookupVariable(name)`.  A scope is any type
-  ///         with a `std::string LookupVariable(StringPiece)` member.
-  template <typename Scope>
-  std::string Evaluate(Scope* scope) const;
-
-  /// @return The string with variables not expanded.
-  std::string Unparse() const;
-
-  void Clear() { parsed_.clear(); single_token_.clear(); }
-  bool empty() const { return parsed_.empty() && single_token_.empty(); }
-
-  void AddText(StringPiece text);
-  void AddSpecial(StringPiece text);
-
-  /// Construct a human-readable representation of the parsed state,
-  /// for use in tests.
-  std::string Serialize() const;
-
-private:
-  enum TokenType { RAW, SPECIAL };
-  typedef std::vector<std::pair<std::string, TokenType> > TokenList;
-  TokenList parsed_;
-
-  // If we hold only a single RAW token, then we keep it here instead of
-  // pushing it on TokenList. This saves a bunch of allocations for
-  // what is a common case. If parsed_ is nonempty, then this value
-  // must be ignored.
-  std::string single_token_;
-};
 
 /// An invocable build command and associated metadata (description, etc.).
 struct Rule {
@@ -85,21 +52,5 @@ struct Rule {
   Bindings bindings_;
   bool phony_ = false;
 };
-
-template <typename Scope>
-std::string EvalString::Evaluate(Scope* scope) const {
-  if (parsed_.empty()) {
-    return single_token_;
-  }
-
-  std::string result;
-  for (TokenList::const_iterator i = parsed_.begin(); i != parsed_.end(); ++i) {
-    if (i->second == RAW)
-      result.append(i->first);
-    else
-      result.append(scope->LookupVariable(i->first));
-  }
-  return result;
-}
 
 #endif  // NINJA_EVAL_ENV_H_
