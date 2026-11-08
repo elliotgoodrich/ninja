@@ -74,7 +74,92 @@ TimeStamp TimeStampFromFileTime(const FILETIME& filetime) {
   return (TimeStamp)mtime - 12622770400LL * (1000000000LL / 100);
 }
 
-TimeStamp StatSingleFile(const string& path, string* err) {
+TimeStamp StatSingleFile(const string& path, string* err);
+
+/// The FILE_STAT_BASIC_INFORMATION struct filled in by
+/// GetFileInformationByName(FileStatBasicByNameInfo).  It is declared here,
+/// with the same layout as in the Windows SDK, as older SDKs and builds
+/// targeting older versions of Windows don't declare it.
+struct FileStatBasicInformation {
+  LARGE_INTEGER FileId;
+  LARGE_INTEGER CreationTime;
+  LARGE_INTEGER LastAccessTime;
+  LARGE_INTEGER LastWriteTime;
+  LARGE_INTEGER ChangeTime;
+  LARGE_INTEGER AllocationSize;
+  LARGE_INTEGER EndOfFile;
+  DWORD FileAttributes;
+  DWORD ReparseTag;
+  DWORD NumberOfLinks;
+  DWORD DeviceType;
+  DWORD DeviceCharacteristics;
+  DWORD Reserved;
+  LARGE_INTEGER VolumeSerialNumber;
+  BYTE FileId128[16];
+};
+
+/// FILE_INFO_BY_NAME_CLASS::FileStatBasicByNameInfo.
+const int kFileStatBasicByNameInfo = 3;
+
+using GetFileInformationByNameFunc = BOOL(WINAPI*)(PCWSTR, int, PVOID, ULONG);
+
+/// Return GetFileInformationByName, which was added in Windows 11 24H2, or
+/// null if this version of Windows doesn't have it.
+GetFileInformationByNameFunc GetFileInformationByNameIfAvailable() {
+  static const GetFileInformationByNameFunc func =
+      reinterpret_cast<GetFileInformationByNameFunc>(
+          reinterpret_cast<void*>(::GetProcAddress(
+              ::GetModuleHandleA("kernel32.dll"), "GetFileInformationByName")));
+  return func;
+}
+
+/// Try to stat |path| with GetFileInformationByName, which is several times
+/// faster than GetFileAttributesEx as it doesn't open the file.  Return true
+/// and set |*mtime| if it could, or false if the caller should fall back to
+/// StatSingleFileSlow(), such as when the function isn't available, the file
+/// system doesn't support it, or |path| is a reparse point.
+bool StatSingleFileByName(const string& path, TimeStamp* mtime) {
+  const GetFileInformationByNameFunc get_info =
+      GetFileInformationByNameIfAvailable();
+  if (!get_info)
+    return false;
+
+  // Convert with the same code page that the "A" functions used elsewhere
+  // in ninja use, so that paths are interpreted the same way.
+  const int path_len = static_cast<int>(path.size());
+  const int wide_len =
+      ::MultiByteToWideChar(CP_ACP, 0, path.data(), path_len, NULL, 0);
+  if (wide_len == 0 && path_len != 0)
+    return false;
+  std::wstring wide_path(wide_len, L'\0');
+  ::MultiByteToWideChar(CP_ACP, 0, path.data(), path_len, &wide_path[0],
+                        wide_len);
+
+  FileStatBasicInformation info;
+  if (!get_info(wide_path.c_str(), kFileStatBasicByNameInfo, &info,
+                sizeof(info))) {
+    const DWORD win_err = ::GetLastError();
+    if (win_err == ERROR_FILE_NOT_FOUND || win_err == ERROR_PATH_NOT_FOUND) {
+      *mtime = 0;
+      return true;
+    }
+    // Leave unsupported file systems and real errors to the slow path, which
+    // produces the error message.
+    return false;
+  }
+
+  // Symlinks and other reparse points are resolved by the slow path.
+  if (info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+    return false;
+
+  FILETIME last_write;
+  last_write.dwLowDateTime = info.LastWriteTime.LowPart;
+  last_write.dwHighDateTime = static_cast<DWORD>(info.LastWriteTime.HighPart);
+  *mtime = TimeStampFromFileTime(last_write);
+  return true;
+}
+
+TimeStamp StatSingleFileSlow(const string& path, string* err) {
   WIN32_FILE_ATTRIBUTE_DATA attrs;
   if (!GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &attrs)) {
     DWORD win_err = GetLastError();
@@ -111,6 +196,13 @@ TimeStamp StatSingleFile(const string& path, string* err) {
   }
 
   return TimeStampFromFileTime(attrs.ftLastWriteTime);
+}
+
+TimeStamp StatSingleFile(const string& path, string* err) {
+  TimeStamp mtime;
+  if (StatSingleFileByName(path, &mtime))
+    return mtime;
+  return StatSingleFileSlow(path, err);
 }
 
 bool IsWindows7OrLater() {
